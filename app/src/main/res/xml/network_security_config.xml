@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <!-- Trust the certificates that ship with the phone -->
+            <certificates src="system" />
+            <!-- ALSO trust certificates installed by the user.
+                 BrowserStack installs its mitmproxy certificate this way.
+                 Without this line, Android 7+ silently refuses the proxy
+                 and no network logs are ever produced. -->
+            <certificates src="user" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

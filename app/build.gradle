@@ -1,6 +1,8 @@
-apply plugin: 'com.android.application'
-apply plugin: 'org.jetbrains.kotlin.android'
-apply plugin: 'com.google.gms.google-services'
+plugins {
+    id 'com.android.application'
+    id 'org.jetbrains.kotlin.android'
+    id 'com.google.gms.google-services'
+}
 
 android {
     namespace 'com.example.analyticsauditor'
@@ -16,7 +18,7 @@ android {
 
     buildTypes {
         debug {
-            // default debug build, nothing special needed
+            minifyEnabled false
         }
     }
 
@@ -31,9 +33,11 @@ android {
 }
 
 dependencies {
-    implementation platform('com.google.firebase:firebase-bom:34.15.0')
-    implementation 'com.google.firebase:firebase-analytics'
-    implementation 'androidx.core:core-ktx:1.13.1'
+    // Not used by MainActivity (the UI is built in code), but kept so that any
+    // leftover old themes.xml / layout files from the previous version still compile.
     implementation 'androidx.appcompat:appcompat:1.7.0'
     implementation 'com.google.android.material:material:1.12.0'
+
+    implementation platform('com.google.firebase:firebase-bom:33.1.2')
+    implementation 'com.google.firebase:firebase-analytics'
 }
