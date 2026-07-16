@@ -23,6 +23,18 @@ class MainActivity : Activity() {
     private var fa: FirebaseAnalytics? = null
     private var counter = 0
 
+    // Two controls we already know get captured, then the analytics endpoints.
+    // If the controls appear in the HAR and the analytics ones do not, BrowserStack
+    // is excluding analytics domains from its proxy — which would end the
+    // BrowserStack route for this project.
+    private fun targets() = listOf(
+        "CONTROL  gstatic"          to "https://www.gstatic.com/generate_204?auditor=$runId",
+        "CONTROL  example.com"      to "https://example.com/?auditor=$runId",
+        "TARGET   app-measurement"  to "https://app-measurement.com/?auditor=$runId",
+        "TARGET   google-analytics" to "https://www.google-analytics.com/g/collect?v=2&tid=G-AUDITOR&cid=$runId&en=canary_event",
+        "TARGET   firebase-install" to "https://firebaseinstallations.googleapis.com/?auditor=$runId"
+    )
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
@@ -35,9 +47,8 @@ class MainActivity : Activity() {
         title.textSize = 18f
         root.addView(title)
 
-        root.addView(button("1. Canary HTTPS request") { sendCanary() })
-        root.addView(button("2. Firebase test_event") { sendFirebaseEvent() })
-        root.addView(button("3. Fire 25 Firebase events") { repeat(25) { sendFirebaseEvent() } })
+        root.addView(button("1. TEST ALL 5 ENDPOINTS") { sendAll() })
+        root.addView(button("2. FIRE 25 FIREBASE EVENTS") { repeat(25) { sendFirebaseEvent() } })
 
         status = TextView(this)
         status.textSize = 12f
@@ -50,9 +61,8 @@ class MainActivity : Activity() {
         log("app started, run id $runId")
         initFirebase()
 
-        // Fire automatically as well, in case tapping is fiddly on a remote device.
-        ui.postDelayed({ sendCanary() }, 1500)
-        ui.postDelayed({ sendFirebaseEvent() }, 3000)
+        // Fire automatically, so the answer is on screen without any tapping.
+        ui.postDelayed({ sendAll() }, 1500)
     }
 
     private fun button(label: String, action: () -> Unit): Button {
@@ -75,32 +85,22 @@ class MainActivity : Activity() {
     }
 
     private fun sendFirebaseEvent() {
-        val instance = fa
-        if (instance == null) {
-            log("no FirebaseAnalytics instance - event NOT sent")
-            return
-        }
+        val instance = fa ?: run { log("no FirebaseAnalytics instance"); return }
         counter++
         val params = Bundle()
         params.putString("source", "auditor_test")
         params.putString("run_id", runId)
         params.putLong("n", counter.toLong())
         instance.logEvent("test_event", params)
-        log("logEvent test_event #$counter (handed to SDK)")
+        if (counter % 25 == 0 || counter == 1) log("logEvent test_event #$counter (handed to SDK)")
     }
 
-    private fun sendCanary() {
-        canary("https://www.gstatic.com/generate_204?auditor=$runId")
-        canary("https://app-measurement.com/?auditor=$runId")
+    private fun sendAll() {
+        for ((label, url) in targets()) hit(label, url)
     }
 
-    private fun canary(urlString: String) {
+    private fun hit(label: String, urlString: String) {
         Thread {
-            val host = try {
-                URL(urlString).host
-            } catch (t: Throwable) {
-                urlString
-            }
             try {
                 val conn = URL(urlString).openConnection() as HttpURLConnection
                 conn.connectTimeout = 10000
@@ -108,9 +108,9 @@ class MainActivity : Activity() {
                 conn.requestMethod = "GET"
                 val code = conn.responseCode
                 conn.disconnect()
-                ui.post { log("canary $host -> HTTP $code") }
+                ui.post { log("$label -> HTTP $code") }
             } catch (t: Throwable) {
-                ui.post { log("canary $host FAILED -> ${t.javaClass.simpleName}: ${t.message}") }
+                ui.post { log("$label FAILED -> ${t.javaClass.simpleName}") }
             }
         }.start()
     }
