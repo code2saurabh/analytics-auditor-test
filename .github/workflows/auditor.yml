@@ -1,11 +1,18 @@
 name: Analytics Auditor PoC
 
-on: 
-  workflow_dispatch: 
+on:
+  workflow_dispatch:
+    inputs:
+      simulate_third_party:
+        description: "Strip our network config, so the APK behaves like a stranger's app"
+        type: boolean
+        default: false
 
 jobs:
   audit:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -16,6 +23,15 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
+      - name: Simulate a third-party APK
+        if: ${{ inputs.simulate_third_party }}
+        run: |
+          echo "Removing our network security config from the manifest..."
+          sed -i '/android:networkSecurityConfig/d' app/src/main/AndroidManifest.xml
+          rm -f app/src/main/res/xml/network_security_config.xml
+          echo "--- manifest now reads: ---"
+          cat app/src/main/AndroidManifest.xml
+
       - name: Compile Debug APK
         run: gradle assembleDebug
 
@@ -24,84 +40,95 @@ jobs:
           sudo apt-get update
           sudo apt-get install mitmproxy -y
 
-          # Start mitmdump in background to generate certificates
           mitmdump --quiet &
-          # Wait until the certificate file appears (timeout after 10s)
-          timeout 10 bash -c 'while [ ! -f ~/.mitmproxy/mitmproxy-ca-cert.pem ]; do sleep 1; done'
-          # Kill the background process
+          timeout 20 bash -c 'while [ ! -f ~/.mitmproxy/mitmproxy-ca-cert.pem ]; do sleep 1; done'
           pkill mitmdump || true
 
-          # Debug: list the directory
-          echo "Contents of ~/.mitmproxy:"
-          ls -la ~/.mitmproxy/ || echo "Directory not found"
-
-          # Ensure the certificate exists
           if [ ! -f ~/.mitmproxy/mitmproxy-ca-cert.pem ]; then
-            echo "ERROR: Certificate file not generated!"
-            exit 1
+            echo "ERROR: certificate was never generated"; exit 1
           fi
 
-          # Calculate hash and copy to workspace
           HASH=$(openssl x509 -inform PEM -subject_hash_old -in ~/.mitmproxy/mitmproxy-ca-cert.pem | head -1)
           cp ~/.mitmproxy/mitmproxy-ca-cert.pem ./$HASH.0
+          echo "Certificate prepared as $HASH.0"
 
-          # Verify the file was created in the workspace
-          echo "Certificate file in workspace:"
-          ls -la *.0
-
-          # Create HAR converter script
           cat > har_dump.py << 'EOF'
-          from mitmproxy import ctx
-          from mitmproxy.net.http.http1 import assemble
-          import json, base64, os, datetime
+          """Turn captured mitmproxy flows into a HAR the auditor website can read."""
+          import base64, datetime, json, os
 
           flows = []
+          MAX_BODY = 512 * 1024
 
-          def request(flow):
+          def response(flow):
               flows.append(flow)
 
+          def _body(raw, ctype):
+              if not raw:
+                  return None
+              raw = raw[:MAX_BODY]
+              try:
+                  return {"mimeType": ctype, "text": raw.decode("utf-8")}
+              except UnicodeDecodeError:
+                  return {"mimeType": ctype,
+                          "text": base64.b64encode(raw).decode(),
+                          "encoding": "base64"}
+
           def done():
-              har = {"log": {"version": "1.2", "creator": {"name": "mitmproxy", "version": "8.1.1"}, "entries": []}}
+              har = {"log": {"version": "1.2",
+                             "creator": {"name": "analytics-auditor", "version": "2.0"},
+                             "entries": []}}
               for f in flows:
                   if f.response is None:
                       continue
-                  entry = {
-                      "startedDateTime": datetime.datetime.utcnow().isoformat() + "Z",
-                      "time": 0,
-                      "request": {
-                          "method": f.request.method,
-                          "url": f.request.pretty_url,
-                          "httpVersion": "HTTP/1.1",
-                          "cookies": [],
-                          "headers": [{"name": k, "value": v} for k, v in f.request.headers.items()],
-                          "queryString": [],
-                          "headersSize": -1,
-                          "bodySize": len(f.request.content or b"")
-                      },
-                      "response": {
-                          "status": f.response.status_code,
-                          "statusText": f.response.reason or "",
-                          "httpVersion": "HTTP/1.1",
-                          "cookies": [],
-                          "headers": [{"name": k, "value": v} for k, v in f.response.headers.items()],
-                          "content": {
-                              "size": len(f.response.content or b""),
-                              "mimeType": f.response.headers.get("content-type", ""),
-                              "text": base64.b64encode(f.response.content or b"").decode()
-                          },
-                          "redirectURL": "",
-                          "headersSize": -1,
-                          "bodySize": len(f.response.content or b"")
-                      },
-                      "cache": {},
-                      "timings": {"send": 0, "wait": 0, "receive": 0}
+
+                  start = f.request.timestamp_start or 0
+                  end = f.response.timestamp_end or start
+                  started = datetime.datetime.fromtimestamp(start, datetime.timezone.utc)
+
+                  req = {
+                      "method": f.request.method,
+                      "url": f.request.pretty_url,
+                      "httpVersion": f.request.http_version,
+                      "cookies": [],
+                      "headers": [{"name": k, "value": v} for k, v in f.request.headers.items()],
+                      "queryString": [{"name": k, "value": v} for k, v in f.request.query.items()],
+                      "headersSize": -1,
+                      "bodySize": len(f.request.raw_content or b""),
                   }
-                  har["log"]["entries"].append(entry)
+                  pd = _body(f.request.raw_content, f.request.headers.get("content-type", ""))
+                  if pd:
+                      pd["params"] = []
+                      req["postData"] = pd
+
+                  resp_body = _body(f.response.raw_content, f.response.headers.get("content-type", ""))
+                  res = {
+                      "status": f.response.status_code,
+                      "statusText": f.response.reason or "",
+                      "httpVersion": f.response.http_version,
+                      "cookies": [],
+                      "headers": [{"name": k, "value": v} for k, v in f.response.headers.items()],
+                      "content": resp_body or {"size": 0, "mimeType": "", "text": ""},
+                      "redirectURL": "",
+                      "headersSize": -1,
+                      "bodySize": len(f.response.raw_content or b""),
+                  }
+                  res["content"]["size"] = len(f.response.raw_content or b"")
+
+                  har["log"]["entries"].append({
+                      "startedDateTime": started.isoformat().replace("+00:00", "Z"),
+                      "time": round((end - start) * 1000, 2),
+                      "request": req,
+                      "response": res,
+                      "cache": {},
+                      "timings": {"send": 0, "wait": round((end - start) * 1000, 2), "receive": 0},
+                  })
+
               out = os.environ.get("HAR_OUT", "dump.har")
               with open(out, "w") as fh:
-                  json.dump(har, fh)
-              ctx.log.info("HAR written to " + out)
+                  json.dump(har, fh, indent=1)
+              print("HAR written to %s with %d entries" % (out, len(har["log"]["entries"])))
           EOF
+          echo "har_dump.py ready"
 
       - name: Boot Emulator and Run Audit
         uses: reactivecircus/android-emulator-runner@v2
@@ -111,46 +138,90 @@ jobs:
           arch: x86_64
           emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none -http-proxy http://127.0.0.1:8080
           script: |
-            echo "Gaining admin root access to phone..."
+            set -x
             adb root
-            
-            echo "Creating a writable system certificate layer..."
+            sleep 3
+            adb wait-for-device
+
+            echo "=== Installing our certificate into the SYSTEM trust store ==="
             adb shell "mkdir -p /data/local/tmp/cacerts && cp /system/etc/security/cacerts/* /data/local/tmp/cacerts/"
             adb shell "mount -t tmpfs tmpfs /system/etc/security/cacerts"
             adb shell "cp /data/local/tmp/cacerts/* /system/etc/security/cacerts/"
-            
-            echo "Injecting mitmproxy certificate into system trust store..."
-            ls -la *.0 || echo "No .0 file found"
-            
-            CERT_FILE=$(ls *.0 | head -n 1); if [ -z "$CERT_FILE" ]; then echo "ERROR: No certificate file (.0) found!"; exit 1; fi; echo "Using certificate file: $CERT_FILE"; adb push "$CERT_FILE" /system/etc/security/cacerts/; adb shell "chmod 644 /system/etc/security/cacerts/$CERT_FILE"; adb shell "chown root:root /system/etc/security/cacerts/$CERT_FILE"
-            
-            echo "Starting proxy recorder..."
-            HAR_OUT=dump.har mitmdump -w dump.mitm -s har_dump.py & echo $! > proxy.pid
-            sleep 5
-            
-            echo "Installing fresh APK..."
-            adb install app/build/outputs/apk/debug/app-debug.apk
-            
-            echo "Launching App..."
-            adb shell monkey -p com.example.analyticsauditor -c android.intent.category.LAUNCHER 1
-            
-            echo "Waiting for app to auto-fire events..."
-            sleep 15
-            
-            echo "Shutting down proxy..."
-            kill $(cat proxy.pid)
-            sleep 2
-            
-            echo "Converting captured flows to HAR..."
-            HAR_OUT=dump.har mitmdump -r dump.mitm -s har_dump.py -q || true
-            
-            echo "Files in workspace:"
-            ls -la dump.har dump.mitm || true
 
-      - name: Upload HAR File
+            CERT_FILE=$(ls *.0 | head -n 1)
+            if [ -z "$CERT_FILE" ]; then echo "ERROR: no .0 certificate found"; exit 1; fi
+            adb push "$CERT_FILE" /system/etc/security/cacerts/
+            adb shell "chmod 644 /system/etc/security/cacerts/$CERT_FILE"
+            adb shell "chown root:root /system/etc/security/cacerts/$CERT_FILE"
+            echo "System certificates now on device:"
+            adb shell "ls /system/etc/security/cacerts/ | wc -l"
+
+            echo "=== Firebase debug mode ==="
+            adb shell setprop debug.firebase.analytics.app com.example.analyticsauditor
+            adb shell setprop log.tag.FA VERBOSE
+            adb shell setprop log.tag.FA-SVC VERBOSE
+            adb shell getprop debug.firebase.analytics.app
+
+            echo "=== Starting the recorder ==="
+            HAR_OUT=dump.har mitmdump -w dump.mitm -s har_dump.py > mitm.log 2>&1 &
+            echo $! > proxy.pid
+            sleep 5
+
+            echo "=== Installing and launching ==="
+            adb logcat -c
+            adb install -r app/build/outputs/apk/debug/app-debug.apk
+            adb shell monkey -p com.example.analyticsauditor -c android.intent.category.LAUNCHER 1
+
+            echo "=== Letting the app fire, then letting Firebase flush ==="
+            sleep 20
+            adb shell input keyevent KEYCODE_HOME
+            sleep 20
+            adb shell monkey -p com.example.analyticsauditor -c android.intent.category.LAUNCHER 1
+            sleep 20
+
+            echo "=== What the Firebase SDK itself says it did ==="
+            adb logcat -d -s FA:V FA-SVC:V > firebase.log 2>&1 || true
+            tail -40 firebase.log || true
+
+            echo "=== Stopping the recorder and writing the HAR ==="
+            kill $(cat proxy.pid) || true
+            sleep 3
+            HAR_OUT=dump.har mitmdump -r dump.mitm -s har_dump.py -q || true
+            ls -la dump.har dump.mitm firebase.log || true
+
+      - name: Summarise what was captured
+        if: always()
+        run: |
+          python3 - << 'EOF'
+          import json, collections, urllib.parse, os
+          if not os.path.exists("dump.har"):
+              print("No HAR was produced."); raise SystemExit(0)
+          d = json.load(open("dump.har"))
+          es = d["log"]["entries"]
+          print("Captured %d requests\n" % len(es))
+          hosts = collections.Counter(urllib.parse.urlparse(e["request"]["url"]).hostname for e in es)
+          for h, n in hosts.most_common():
+              print("  %3d  %s" % (n, h))
+          print()
+          fb = [e for e in es if "app-measurement" in (e["request"]["url"] or "")
+                and e["request"]["method"] == "POST"]
+          print("Firebase event uploads captured: %d" % len(fb))
+          for e in fb:
+              body = e["request"].get("postData", {})
+              print("   POST %s  body=%d bytes  encoding=%s"
+                    % (e["request"]["url"][:60], e["request"]["bodySize"], body.get("encoding", "text")))
+          if not fb:
+              print("   None. If debug mode was set, the SDK had nothing queued to send -")
+              print("   check that the app actually logs an event on launch.")
+          EOF
+
+      - name: Upload results
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: network-log
+          name: audit-results
           path: |
             dump.har
             dump.mitm
+            firebase.log
+            mitm.log
