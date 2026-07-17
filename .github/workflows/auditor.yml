@@ -63,25 +63,78 @@ jobs:
             echo "Creating a writable system certificate layer..."
             adb shell "mkdir -p /data/local/tmp/cacerts && cp /system/etc/security/cacerts/* /data/local/tmp/cacerts/"
             adb shell "mount -t tmpfs tmpfs /system/etc/security/cacerts"
-            
-            # Moving the temp files into the system folder
             adb shell "cp /data/local/tmp/cacerts/* /system/etc/security/cacerts/"
             
             echo "Injecting mitmproxy certificate into system trust store..."
-            echo "Files in workspace:"
             ls -la *.0 || echo "No .0 file found"
             
-            # All commands that need CERT_FILE are combined into one shell invocation
-            CERT_FILE=$(ls *.0 | head -n 1); \
-            [ -z "$CERT_FILE" ] && echo "ERROR: No certificate file (.0) found!" && exit 1; \
-            echo "Using certificate file: $CERT_FILE"; \
-            adb push $CERT_FILE /system/etc/security/cacerts/; \
-            adb shell "chmod 644 /system/etc/security/cacerts/$CERT_FILE"; \
+            CERT_FILE=$(ls *.0 | head -n 1)
+            if [ -z "$CERT_FILE" ]; then
+              echo "ERROR: No certificate file (.0) found!"
+              exit 1
+            fi
+            echo "Using certificate file: $CERT_FILE"
+            adb push "$CERT_FILE" /system/etc/security/cacerts/
+            adb shell "chmod 644 /system/etc/security/cacerts/$CERT_FILE"
             adb shell "chown root:root /system/etc/security/cacerts/$CERT_FILE"
             
+            echo "Writing HAR converter script..."
+            cat > har_dump.py << 'EOF'
+            from mitmproxy import ctx
+            from mitmproxy.net.http.http1 import assemble
+            import json, base64, os, datetime
+
+            flows = []
+
+            def request(flow):
+                flows.append(flow)
+
+            def done():
+                har = {"log": {"version": "1.2", "creator": {"name": "mitmproxy", "version": "8.1.1"}, "entries": []}}
+                for f in flows:
+                    if f.response is None:
+                        continue
+                    entry = {
+                        "startedDateTime": datetime.datetime.utcnow().isoformat() + "Z",
+                        "time": 0,
+                        "request": {
+                            "method": f.request.method,
+                            "url": f.request.pretty_url,
+                            "httpVersion": "HTTP/1.1",
+                            "cookies": [],
+                            "headers": [{"name": k, "value": v} for k, v in f.request.headers.items()],
+                            "queryString": [],
+                            "headersSize": -1,
+                            "bodySize": len(f.request.content or b"")
+                        },
+                        "response": {
+                            "status": f.response.status_code,
+                            "statusText": f.response.reason or "",
+                            "httpVersion": "HTTP/1.1",
+                            "cookies": [],
+                            "headers": [{"name": k, "value": v} for k, v in f.response.headers.items()],
+                            "content": {
+                                "size": len(f.response.content or b""),
+                                "mimeType": f.response.headers.get("content-type", ""),
+                                "text": base64.b64encode(f.response.content or b"").decode()
+                            },
+                            "redirectURL": "",
+                            "headersSize": -1,
+                            "bodySize": len(f.response.content or b"")
+                        },
+                        "cache": {},
+                        "timings": {"send": 0, "wait": 0, "receive": 0}
+                    }
+                    har["log"]["entries"].append(entry)
+                out = os.environ.get("HAR_OUT", "dump.har")
+                with open(out, "w") as fh:
+                    json.dump(har, fh)
+                ctx.log.info("HAR written to " + out)
+            EOF
+
             echo "Starting proxy recorder..."
-            mitmdump -w dump.har &
-            
+            HAR_OUT=dump.har mitmdump -w dump.mitm -s har_dump.py &
+            PROXY_PID=$!
             sleep 5
             
             echo "Installing fresh APK..."
@@ -94,10 +147,19 @@ jobs:
             sleep 15
             
             echo "Shutting down proxy..."
-            pkill mitmdump
+            kill $PROXY_PID
+            sleep 2
+            
+            echo "Converting captured flows to HAR..."
+            HAR_OUT=dump.har mitmdump -r dump.mitm -s har_dump.py -q || true
+            
+            echo "Files in workspace:"
+            ls -la dump.har dump.mitm || true
 
       - name: Upload HAR File
         uses: actions/upload-artifact@v4
         with:
           name: network-log
-          path: dump.har
+          path: |
+            dump.har
+            dump.mitm
