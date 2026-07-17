@@ -23,13 +23,23 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install mitmproxy -y
-          
-          # Force generate the default proxy security files
-          timeout 2 mitmdump || true
-          
-          # Calculate the unique filename hash Android requires for system certs
+
+          # Start mitmdump in background to generate certificates
+          mitmdump --quiet &
+          # Wait for it to create the files
+          sleep 5
+          # Kill the background process
+          pkill mitmdump || true
+
+          # Verify certificate exists (optional, helps debugging)
+          ls -la ~/.mitmproxy/
+
+          # Calculate hash and copy to workspace
           HASH=$(openssl x509 -inform PEM -subject_hash_old -in ~/.mitmproxy/mitmproxy-ca-cert.pem | head -1)
           cp ~/.mitmproxy/mitmproxy-ca-cert.pem ./$HASH.0
+
+          # Verify the file was created
+          ls -la *.0
 
       - name: Boot Emulator and Run Audit
         uses: reactivecircus/android-emulator-runner@v2
