@@ -31,7 +31,7 @@ class MainActivity : Activity() {
         "CONTROL  gstatic"          to "https://www.gstatic.com/generate_204?auditor=$runId",
         "CONTROL  example.com"      to "https://example.com/?auditor=$runId",
         "TARGET   app-measurement"  to "https://app-measurement.com/?auditor=$runId",
-        "TARGET   google-analytics" to "https://www.google-analytics.com/g/collect?v=2&tid=G-AUDITOR&cid=$runId&en=canary_event",
+        "TARGET   google-analytics" to "https://www.google-analytics.com/g/collect?v=2&tid=G-AUDITOR&cid=$runId&en=canary_event&ep.test_status=active&epn.attempt_count=1",
         "TARGET   firebase-install" to "https://firebaseinstallations.googleapis.com/?auditor=$runId"
     )
 
