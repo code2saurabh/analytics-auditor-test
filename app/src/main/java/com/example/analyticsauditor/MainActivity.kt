@@ -61,8 +61,11 @@ class MainActivity : Activity() {
         log("app started, run id $runId")
         initFirebase()
 
-        // Fire automatically, so the answer is on screen without any tapping.
+          // Fire automatically, so the answer is on screen without any tapping.
         ui.postDelayed({ sendAll() }, 1500)
+        // Also fire real Firebase events on launch. The emulator has nobody to
+        // tap button 2, so without this the run captures canaries only.
+        ui.postDelayed({ repeat(10) { sendFirebaseEvent() } }, 3000)
     }
 
     private fun button(label: String, action: () -> Unit): Button {
