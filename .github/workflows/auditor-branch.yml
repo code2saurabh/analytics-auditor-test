@@ -3,15 +3,19 @@ name: Analytics Auditor PoC
 on:
   workflow_dispatch:
     inputs:
+      apk_url:
+        description: "URL of an .apk or .apkm to audit. Leave blank to audit our own test app."
+        type: string
+        default: ""
       simulate_third_party:
-        description: "Strip our network config, so the APK behaves like a stranger's app"
+        description: "Strip our network config (only affects our own test app)"
         type: boolean
         default: false
 
 jobs:
   audit:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
 
     steps:
       - name: Checkout Repository
@@ -23,17 +27,32 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
+      # Only relevant when auditing our own app.
       - name: Simulate a third-party APK
-        if: ${{ inputs.simulate_third_party }}
+        if: ${{ inputs.simulate_third_party && inputs.apk_url == '' }}
         run: |
-          echo "Removing our network security config from the manifest..."
           sed -i '/android:networkSecurityConfig/d' app/src/main/AndroidManifest.xml
           rm -f app/src/main/res/xml/network_security_config.xml
-          echo "--- manifest now reads: ---"
-          cat app/src/main/AndroidManifest.xml
+          echo "Network config stripped."
 
+      # Skipped entirely when auditing someone else's app - it is already built.
       - name: Compile Debug APK
+        if: ${{ inputs.apk_url == '' }}
         run: gradle assembleDebug
+
+      # The APK never lives in the repo. It is fetched at run time from a URL,
+      # which is how a real backend would hand a client's upload to a runner.
+      - name: Fetch the app under test
+        if: ${{ inputs.apk_url != '' }}
+        run: |
+          mkdir -p test-apks
+          echo "Downloading: ${{ inputs.apk_url }}"
+          curl -sSL --fail -o test-apks/target.bin "${{ inputs.apk_url }}" || {
+            echo "ERROR: download failed. Is the URL public and direct?"; exit 1; }
+          ls -la test-apks/
+          file test-apks/target.bin
+          echo "--- what is inside it ---"
+          unzip -l test-apks/target.bin | head -30 || echo "(not a zip)"
 
       - name: Install Network Proxy and Prepare Certificate
         run: |
@@ -133,8 +152,8 @@ jobs:
       - name: Boot Emulator and Run Audit
         uses: reactivecircus/android-emulator-runner@v2
         with:
-          api-level: 29
-          target: default
+          api-level: 30
+          target: google_apis
           arch: x86_64
           emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none -http-proxy http://127.0.0.1:8080
           script: |
@@ -150,20 +169,45 @@ jobs:
           d = json.load(open("dump.har"))
           es = d["log"]["entries"]
           print("Captured %d requests\n" % len(es))
-          hosts = collections.Counter(urllib.parse.urlparse(e["request"]["url"]).hostname for e in es)
+
+          VENDORS = {
+            "app-measurement.com": "Firebase / GA4",
+            "google-analytics.com": "GA4",
+            "analytics.google.com": "GA4",
+            "firebaseinstallations.googleapis.com": "Firebase",
+            "adjust.com": "Adjust",
+            "appsflyer.com": "AppsFlyer",
+            "graph.facebook.com": "Meta",
+            "amplitude.com": "Amplitude",
+            "mixpanel.com": "Mixpanel",
+            "branch.io": "Branch",
+            "segment.io": "Segment",
+            "analytics.tiktok.com": "TikTok",
+            "omtrdc.net": "Adobe",
+            "clevertap.com": "CleverTap",
+          }
+          hosts = collections.Counter(urllib.parse.urlparse(e["request"]["url"]).hostname or "?" for e in es)
+          print("--- every host contacted ---")
           for h, n in hosts.most_common():
-              print("  %3d  %s" % (n, h))
-          print()
+              tag = ""
+              for suf, name in VENDORS.items():
+                  if h == suf or h.endswith("." + suf): tag = "   <-- " + name
+              print("  %3d  %s%s" % (n, h, tag))
+
+          print("\n--- analytics vendors detected ---")
+          found = set()
+          for h in hosts:
+              for suf, name in VENDORS.items():
+                  if h == suf or h.endswith("." + suf): found.add(name)
+          print("  " + (", ".join(sorted(found)) if found else "none"))
+
           fb = [e for e in es if "app-measurement" in (e["request"]["url"] or "")
                 and e["request"]["method"] == "POST"]
-          print("Firebase event uploads captured: %d" % len(fb))
+          print("\nFirebase event uploads captured: %d" % len(fb))
           for e in fb:
               body = e["request"].get("postData", {})
               print("   POST %s  body=%d bytes  encoding=%s"
                     % (e["request"]["url"][:60], e["request"]["bodySize"], body.get("encoding", "text")))
-          if not fb:
-              print("   None. If debug mode was set, the SDK had nothing queued to send -")
-              print("   check that the app actually logs an event on launch.")
           EOF
 
       - name: Upload results
@@ -175,4 +219,6 @@ jobs:
             dump.har
             dump.mitm
             firebase.log
+            crash.log
             mitm.log
+            screen-*.png
