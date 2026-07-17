@@ -1,7 +1,7 @@
 name: Analytics Auditor PoC
 
 on: 
-  workflow_dispatch: # This allows you to trigger the test manually via a button
+  workflow_dispatch: # Allows manual trigger via the button
 
 jobs:
   audit:
@@ -10,18 +10,28 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
+      # Step 1: Set up Java environment to compile the app
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      # Step 2: Give permission to run the build script
+      - name: Grant Execute Permission to Gradle
+        run: chmod +x gradlew
+
+      # Step 3: Build the fresh APK right here
+      - name: Compile Debug APK
+        run: ./gradlew assembleDebug
+
+      # Step 4: Install the proxy recorder
       - name: Install Network Proxy (mitmproxy)
         run: |
           sudo apt-get update
           sudo apt-get install mitmproxy -y
 
-      # We wait for the build.yml to finish creating the APK, then we download it to test
-      - name: Download APK from Build Job
-        uses: actions/download-artifact@v4
-        with:
-          name: app-debug # Make sure this matches the artifact name in your build.yml
-          path: app/build/outputs/apk/debug/
-
+      # Step 5: Boot the phone and run the app
       - name: Boot Emulator and Run Audit
         uses: reactivecircus/android-emulator-runner@v2
         with:
@@ -36,7 +46,8 @@ jobs:
             
             sleep 5
             
-            echo "Installing APK..."
+            echo "Installing fresh APK..."
+            # The compile step puts the APK exactly here automatically
             adb install app/build/outputs/apk/debug/app-debug.apk
             
             echo "Launching App..."
@@ -48,6 +59,7 @@ jobs:
             echo "Shutting down proxy..."
             kill $PROXY_PID
 
+      # Step 6: Save the finished log file
       - name: Upload HAR File
         uses: actions/upload-artifact@v4
         with:
