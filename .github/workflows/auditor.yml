@@ -45,7 +45,9 @@ jobs:
             echo "Creating a writable system certificate layer..."
             adb shell "mkdir -p /data/local/tmp/cacerts && cp /system/etc/security/cacerts/* /data/local/tmp/cacerts/"
             adb shell "mount -t tmpfs tmpfs /system/etc/security/cacerts"
-            adb shell "cp /data/local/tmp/cacerts/* /data/local/tmp/cacerts/"
+            
+            # THE CORRECTED LINE: Moving the temp files into the system folder
+            adb shell "cp /data/local/tmp/cacerts/* /system/etc/security/cacerts/"
             
             echo "Injecting mitmproxy certificate into system trust store..."
             CERT_FILE=$(ls *.0 | head -n 1)
