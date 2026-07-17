@@ -68,14 +68,10 @@ jobs:
             adb shell "cp /data/local/tmp/cacerts/* /system/etc/security/cacerts/"
             
             echo "Injecting mitmproxy certificate into system trust store..."
-            # Debug: list files in workspace
             echo "Files in workspace:"
             ls -la *.0 || echo "No .0 file found"
             CERT_FILE=$(ls *.0 | head -n 1)
-            if [ -z "$CERT_FILE" ]; then
-              echo "ERROR: No certificate file (.0) found!"
-              exit 1
-            fi
+            [ -z "$CERT_FILE" ] && echo "ERROR: No certificate file (.0) found!" && exit 1
             echo "Using certificate file: $CERT_FILE"
             adb push $CERT_FILE /system/etc/security/cacerts/
             adb shell "chmod 644 /system/etc/security/cacerts/$CERT_FILE"
