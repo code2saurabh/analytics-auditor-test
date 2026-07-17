@@ -17,21 +17,17 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      # Step 2: Give permission to run the build script
-      - name: Grant Execute Permission to Gradle
-        run: chmod +x gradlew
-
-      # Step 3: Build the fresh APK right here
+      # Step 2: Build the fresh APK right here using the system's pre-installed Gradle
       - name: Compile Debug APK
-        run: ./gradlew assembleDebug
+        run: gradle assembleDebug
 
-      # Step 4: Install the proxy recorder
+      # Step 3: Install the proxy recorder
       - name: Install Network Proxy (mitmproxy)
         run: |
           sudo apt-get update
           sudo apt-get install mitmproxy -y
 
-      # Step 5: Boot the phone and run the app
+      # Step 4: Boot the phone and run the app
       - name: Boot Emulator and Run Audit
         uses: reactivecircus/android-emulator-runner@v2
         with:
@@ -47,7 +43,6 @@ jobs:
             sleep 5
             
             echo "Installing fresh APK..."
-            # The compile step puts the APK exactly here automatically
             adb install app/build/outputs/apk/debug/app-debug.apk
             
             echo "Launching App..."
@@ -59,7 +54,7 @@ jobs:
             echo "Shutting down proxy..."
             kill $PROXY_PID
 
-      # Step 6: Save the finished log file
+      # Step 5: Save the finished log file
       - name: Upload HAR File
         uses: actions/upload-artifact@v4
         with:
