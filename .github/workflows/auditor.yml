@@ -1,0 +1,55 @@
+name: Analytics Auditor PoC
+
+on: 
+  workflow_dispatch: # This allows you to trigger the test manually via a button
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install Network Proxy (mitmproxy)
+        run: |
+          sudo apt-get update
+          sudo apt-get install mitmproxy -y
+
+      # We wait for the build.yml to finish creating the APK, then we download it to test
+      - name: Download APK from Build Job
+        uses: actions/download-artifact@v4
+        with:
+          name: app-debug # Make sure this matches the artifact name in your build.yml
+          path: app/build/outputs/apk/debug/
+
+      - name: Boot Emulator and Run Audit
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 29
+          target: default
+          arch: x86_64
+          emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none -http-proxy http://127.0.0.1:8080
+          script: |
+            echo "Starting proxy recorder..."
+            mitmdump -w dump.har &
+            PROXY_PID=$!
+            
+            sleep 5
+            
+            echo "Installing APK..."
+            adb install app/build/outputs/apk/debug/app-debug.apk
+            
+            echo "Launching App..."
+            adb shell monkey -p com.example.analyticsauditor -c android.intent.category.LAUNCHER 1
+            
+            echo "Waiting for app to auto-fire events..."
+            sleep 15
+            
+            echo "Shutting down proxy..."
+            kill $PROXY_PID
+
+      - name: Upload HAR File
+        uses: actions/upload-artifact@v4
+        with:
+          name: network-log
+          path: dump.har
