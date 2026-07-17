@@ -26,19 +26,27 @@ jobs:
 
           # Start mitmdump in background to generate certificates
           mitmdump --quiet &
-          # Wait for it to create the files
-          sleep 5
+          # Wait until the certificate file appears (timeout after 10s)
+          timeout 10 bash -c 'while [ ! -f ~/.mitmproxy/mitmproxy-ca-cert.pem ]; do sleep 1; done'
           # Kill the background process
           pkill mitmdump || true
 
-          # Verify certificate exists (optional, helps debugging)
-          ls -la ~/.mitmproxy/
+          # Debug: list the directory
+          echo "Contents of ~/.mitmproxy:"
+          ls -la ~/.mitmproxy/ || echo "Directory not found"
+
+          # Ensure the certificate exists
+          if [ ! -f ~/.mitmproxy/mitmproxy-ca-cert.pem ]; then
+            echo "ERROR: Certificate file not generated!"
+            exit 1
+          fi
 
           # Calculate hash and copy to workspace
           HASH=$(openssl x509 -inform PEM -subject_hash_old -in ~/.mitmproxy/mitmproxy-ca-cert.pem | head -1)
           cp ~/.mitmproxy/mitmproxy-ca-cert.pem ./$HASH.0
 
-          # Verify the file was created
+          # Verify the file was created in the workspace
+          echo "Certificate file in workspace:"
           ls -la *.0
 
       - name: Boot Emulator and Run Audit
@@ -56,11 +64,19 @@ jobs:
             adb shell "mkdir -p /data/local/tmp/cacerts && cp /system/etc/security/cacerts/* /data/local/tmp/cacerts/"
             adb shell "mount -t tmpfs tmpfs /system/etc/security/cacerts"
             
-            # THE CORRECTED LINE: Moving the temp files into the system folder
+            # Moving the temp files into the system folder
             adb shell "cp /data/local/tmp/cacerts/* /system/etc/security/cacerts/"
             
             echo "Injecting mitmproxy certificate into system trust store..."
+            # Debug: list files in workspace
+            echo "Files in workspace:"
+            ls -la *.0 || echo "No .0 file found"
             CERT_FILE=$(ls *.0 | head -n 1)
+            if [ -z "$CERT_FILE" ]; then
+              echo "ERROR: No certificate file (.0) found!"
+              exit 1
+            fi
+            echo "Using certificate file: $CERT_FILE"
             adb push $CERT_FILE /system/etc/security/cacerts/
             adb shell "chmod 644 /system/etc/security/cacerts/$CERT_FILE"
             adb shell "chown root:root /system/etc/security/cacerts/$CERT_FILE"
