@@ -1,7 +1,7 @@
 name: Analytics Auditor PoC
 
 on: 
-  workflow_dispatch: # Allows manual trigger via the button
+  workflow_dispatch: 
 
 jobs:
   audit:
@@ -10,24 +10,20 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      # Step 1: Set up Java environment to compile the app
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
           java-version: '17'
 
-      # Step 2: Build the fresh APK right here using the system's pre-installed Gradle
       - name: Compile Debug APK
         run: gradle assembleDebug
 
-      # Step 3: Install the proxy recorder
       - name: Install Network Proxy (mitmproxy)
         run: |
           sudo apt-get update
           sudo apt-get install mitmproxy -y
 
-      # Step 4: Boot the phone and run the app
       - name: Boot Emulator and Run Audit
         uses: reactivecircus/android-emulator-runner@v2
         with:
@@ -38,7 +34,6 @@ jobs:
           script: |
             echo "Starting proxy recorder..."
             mitmdump -w dump.har &
-            PROXY_PID=$!
             
             sleep 5
             
@@ -52,9 +47,8 @@ jobs:
             sleep 15
             
             echo "Shutting down proxy..."
-            kill $PROXY_PID
+            pkill mitmdump
 
-      # Step 5: Save the finished log file
       - name: Upload HAR File
         uses: actions/upload-artifact@v4
         with:
