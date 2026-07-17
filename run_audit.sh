@@ -39,16 +39,20 @@ adb logcat -c
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 adb shell monkey -p com.example.analyticsauditor -c android.intent.category.LAUNCHER 1
 
+# --- UPDATED: Increased sleep timers and removed the second monkey launch ---
 echo "=== Letting the app fire, then letting Firebase flush ==="
-sleep 20
+sleep 45
 adb shell input keyevent KEYCODE_HOME
-sleep 20
-adb shell monkey -p com.example.analyticsauditor -c android.intent.category.LAUNCHER 1
-sleep 20
+echo "=== App backgrounded. Now leave the SDK completely alone. ==="
+sleep 90
 
 echo "=== What the Firebase SDK says it did ==="
 adb logcat -d -s FA:V FA-SVC:V > firebase.log 2>&1 || true
 tail -40 firebase.log || true
+
+# --- ADDED: Logcat verification check right before killing the proxy ---
+echo "=== Did the upload actually go? ==="
+adb logcat -d -s FA:V FA-SVC:V | grep -iE "Uploading|upload_url|Successful upload|Network upload" | tail -20
 
 echo "=== Stopping the recorder and writing the HAR ==="
 kill $PROXY_PID || true
