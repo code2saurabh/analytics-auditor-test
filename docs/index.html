@@ -422,6 +422,7 @@ async function extract(har){
   let fbDecoded = 0;     // Firebase uploads we successfully opened
   const fbProps = {};    // user properties from inside the blob
   let fbPkg = null;      // which app the blob says it came from
+  const fbPkgs = {};     // events counted per package (to spot other apps)
   const hosts = {};
   const analytics = [];
   const texts = [];      // text we can scan for PII
@@ -458,16 +459,16 @@ async function extract(har){
         fbDecoded++;
         for (const b of bundles){
           for (const ev of b.events){
-            found.push({ name: unwire(ev.name), params: ev.params, tid: "", cid: "", src: "firebase" });
+            found.push({ name: unwire(ev.name), params: ev.params, tid: "", cid: "", src: "firebase", pkg: b.pkg || "" });
             for (const [k, v] of Object.entries(ev.params)) texts.push(k + "=" + v);
           }
           Object.assign(fbProps, b.props);
-          if (b.pkg) fbPkg = b.pkg;
+          if (b.pkg){ fbPkg = b.pkg; fbPkgs[b.pkg] = (fbPkgs[b.pkg] || 0) + b.events.length; }
         }
       } else if (!fromUrl) opaque++;
     }
   }
-  return { entries, found, opaque, fbUploads, fbSeen, fbDecoded, fbProps, fbPkg, hosts, analytics, texts };
+  return { entries, found, opaque, fbUploads, fbSeen, fbDecoded, fbProps, fbPkg, fbPkgs, hosts, analytics, texts };
 }
 
 function scanPII(texts){
@@ -490,7 +491,7 @@ function scanPII(texts){
 // ---------- report ----------
 async function run(har, name){
   lastHar = har; lastName = name;
-  const { entries, found, opaque, fbUploads, fbSeen, fbDecoded, fbProps, fbPkg, hosts, analytics, texts } = await extract(har);
+  const { entries, found, opaque, fbUploads, fbSeen, fbDecoded, fbProps, fbPkg, fbPkgs, hosts, analytics, texts } = await extract(har);
   const spec = parseSpec($('spec').value);
   const out = $('out');
   $('report').classList.remove('hidden');
@@ -610,11 +611,22 @@ async function run(har, name){
 
   // What actually came out of the Firebase upload.
   if (fbDecoded){
-    const fbEvents = found.filter(f => f.src === "firebase");
+    // If several apps sent Firebase data, the app under test is the one with the
+    // most events. Judge only that one; the others are noise from the device.
+    const pkgList = Object.keys(fbPkgs).sort((a,b) => fbPkgs[b] - fbPkgs[a]);
+    const mainPkg = pkgList[0] || fbPkg || "";
+    const fbEvents = found.filter(f => f.src === "firebase" && (!mainPkg || f.pkg === mainPkg));
     h += `<h4>Read out of the Firebase upload</h4>
-      <div class="banner ok"><h3>${fbDecoded} upload${fbDecoded > 1 ? "s" : ""} decoded &mdash; ${fbEvents.length} events inside</h3>
+      <div class="banner ok"><h3>${fbDecoded} upload${fbDecoded > 1 ? "s" : ""} decoded &mdash; ${fbEvents.length} events from the app under test</h3>
       <p>The Android SDK gzips its events into a binary blob. This one was unpacked and read.
-      ${fbPkg ? "The blob says it came from <b>" + esc(fbPkg) + "</b>." : ""}</p></div>
+      ${mainPkg ? "Judging <b>" + esc(mainPkg) + "</b>." : ""}</p></div>`;
+    if (pkgList.length > 1){
+      const others = pkgList.slice(1).map(pk => esc(pk) + " (" + fbPkgs[pk] + ")").join(", ");
+      h += `<p class="why"><b>Other apps on the device also sent analytics:</b> ${others}.
+      These are ignored here \u2014 they are not the app under test. In a finished product the
+      capture would be limited to the target app from the start.</p>`;
+    }
+    h += `
       <table><tr><th style="width:22%">Event</th><th style="width:8%">Times</th><th>Parameters carried</th></tr>`;
     const byName = {};
     for (const e of fbEvents) (byName[e.name] = byName[e.name] || []).push(e);
