@@ -11,6 +11,10 @@ on:
         description: "Strip our network config (only affects our own test app)"
         type: boolean
         default: false
+      journey_steps:
+        description: "Journey: one step per line - e.g. 'tap Akceptuje' / 'type shoes' / 'wait 3'"
+        type: string
+        default: ""
 
 jobs:
   audit:
@@ -167,7 +171,7 @@ jobs:
           arch: x86_64
           emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none -http-proxy http://127.0.0.1:8080
           script: |
-            bash ./run_audit.sh
+            JOURNEY_STEPS="${{ inputs.journey_steps }}" bash ./run_audit.sh
 
       - name: Summarise what was captured
         if: always()
@@ -232,3 +236,4 @@ jobs:
             crash.log
             mitm.log
             screen-*.png
+            ui.xml
