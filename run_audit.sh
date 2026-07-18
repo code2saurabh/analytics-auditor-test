@@ -175,7 +175,7 @@ run_step() {
 }
 
 if [ -n "$JOURNEY_STEPS" ]; then
-  echo "$JOURNEY_STEPS" | while IFS= read -r line; do
+  echo "$JOURNEY_STEPS" | tr ';' '\n' | while IFS= read -r line; do
     line="$(echo "$line" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
     [ -z "$line" ] && continue
     verb="$(echo "$line" | cut -d' ' -f1)"
