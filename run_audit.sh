@@ -1,6 +1,64 @@
 #!/usr/bin/env bash
 set -x
 
+# ============================================================================
+#  Screen-reading tapper.
+#  Instead of tapping random pixels, we ask Android for a dump of everything
+#  on screen (text + coordinates), find the element whose text matches what we
+#  want, and tap the centre of its box. This works on any screen size and any
+#  app, because it finds things by their words, not by fixed pixels.
+# ============================================================================
+
+# tap_text "some words"  -> finds an element containing those words, taps it.
+# Returns 0 if it tapped something, 1 if it found nothing.
+tap_text() {
+  local want="$1"
+  adb shell uiautomator dump /sdcard/ui.xml >/dev/null 2>&1
+  adb pull /sdcard/ui.xml /tmp/ui.xml >/dev/null 2>&1
+  # Find the first node whose text= or content-desc= contains $want (case-insensitive),
+  # and read its bounds="[x1,y1][x2,y2]". Then tap the centre.
+  local coords
+  coords=$(python3 - "$want" <<'PYE'
+import sys, re, unicodedata
+def flat(t):
+    # strip accents so "Akceptuje" matches "Akceptuje" with a tail, etc.
+    t = unicodedata.normalize('NFKD', t)
+    return ''.join(c for c in t if not unicodedata.combining(c)).lower()
+want = flat(sys.argv[1])
+try:
+    xml = open('/tmp/ui.xml', encoding='utf-8').read()
+except Exception:
+    print(""); sys.exit()
+for m in re.finditer(r'<node[^>]*?>', xml):
+    tag = m.group(0)
+    tm = re.search(r'text="([^"]*)"', tag)
+    dm = re.search(r'content-desc="([^"]*)"', tag)
+    hay = flat((tm.group(1) if tm else "") + " " + (dm.group(1) if dm else ""))
+    if want in hay and hay.strip():
+        bm = re.search(r'bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"', tag)
+        if bm:
+            x1,y1,x2,y2 = map(int, bm.groups())
+            print(f"{(x1+x2)//2} {(y1+y2)//2}")
+            break
+PYE
+)
+  if [ -n "$coords" ]; then
+    echo "TAP  '$want'  at  $coords"
+    adb shell input tap $coords
+    return 0
+  else
+    echo "SKIP '$want'  (not found on screen)"
+    return 1
+  fi
+}
+
+# type_text "words"  -> types into whatever field is focused.
+type_text() {
+  echo "TYPE '$1'"
+  adb shell input text "$(echo "$1" | sed 's/ /%s/g')"
+}
+
+
 adb root
 sleep 5
 adb wait-for-device
@@ -93,13 +151,47 @@ else
   echo "############################################################"
 fi
 
-echo "=== A crude journey: 30 random taps ==="
-# Not a real journey - just enough poking to make a real app do something.
-# Fixed seed so the same walk repeats. Nav/system keys off so it does not
-# just press Back and quit.
-adb shell monkey -p "$PKG" --throttle 800 --pct-syskeys 0 -s 42 -v 30 || true
-sleep 10
-adb exec-out screencap -p > screen-2-after-taps.png
+echo "=== Running the journey ==="
+# JOURNEY_STEPS comes in from the workflow as one instruction per line.
+# Each line is either:   tap Some Text       (find that text on screen, tap it)
+#                        type some words     (type into the focused field)
+#                        wait 3              (pause N seconds)
+#                        key back            (press a hardware key)
+# If no steps were supplied, fall back to just dismissing a consent dialog.
+STEP_NUM=0
+run_step() {
+  local verb="$1"; shift
+  local arg="$*"
+  case "$verb" in
+    tap)  tap_text "$arg" || true ;;
+    type) type_text "$arg" ;;
+    wait) sleep "${arg:-2}" ;;
+    key)  adb shell input keyevent "KEYCODE_$(echo "$arg" | tr a-z A-Z)" ;;
+    *)    echo "unknown step: $verb $arg" ;;
+  esac
+  STEP_NUM=$((STEP_NUM+1))
+  sleep 2
+  adb exec-out screencap -p > "screen-step-$STEP_NUM.png"
+}
+
+if [ -n "$JOURNEY_STEPS" ]; then
+  echo "$JOURNEY_STEPS" | while IFS= read -r line; do
+    line="$(echo "$line" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+    [ -z "$line" ] && continue
+    verb="$(echo "$line" | cut -d' ' -f1)"
+    rest="$(echo "$line" | cut -s -d' ' -f2-)"
+    echo "--- step: $verb | $rest ---"
+    run_step "$verb" "$rest"
+  done
+else
+  echo "No journey supplied - just trying to dismiss a consent dialog."
+  for word in Accept Akceptuje Agree Zgadzam Allow OK Continue Got; do
+    tap_text "$word" && break
+  done
+fi
+
+sleep 5
+adb exec-out screencap -p > screen-2-after-journey.png
 
 echo "=== Backgrounding, then leaving the SDK alone to flush ==="
 adb shell input keyevent KEYCODE_HOME
