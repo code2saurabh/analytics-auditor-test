@@ -148,7 +148,8 @@ if [ -f "$TARGET" ]; then
     adb install-multiple -r /tmp/splits/*.apk || INSTALL_OK=0
   else
     echo "Single APK detected"
-    adb install -r "$TARGET" || INSTALL_OK=0
+    cp "$TARGET" /tmp/app.apk
+    adb install -r /tmp/app.apk || INSTALL_OK=0
   fi
 else
   echo "No external app supplied - auditing our own test app"
