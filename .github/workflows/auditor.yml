@@ -46,17 +46,34 @@ jobs:
 
       # The APK never lives in the repo. It is fetched at run time from a URL,
       # which is how a real backend would hand a client's upload to a runner.
+      - name: Compute cache key from APK
+        id: cachekey
+        env:
+          APK_URL: ${{ inputs.apk_url }}
+        run: |
+          # The object path (before "?") is stable per uploaded file; the signed
+          # query part changes every run, so we key on the path only.
+          OBJ=$(printf '%s' "$APK_URL" | sed 's/?.*//')
+          echo "key=apk-$(printf '%s' "$OBJ" | sha256sum | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore cached APK
+        uses: actions/cache@v4
+        with:
+          path: test-apks/target.bin
+          key: ${{ steps.cachekey.outputs.key }}
+
       - name: Fetch the app under test
-        if: ${{ inputs.apk_url != '' }}
+        env:
+          APK_URL: ${{ inputs.apk_url }}
         run: |
           mkdir -p test-apks
-          echo "Downloading: ${{ inputs.apk_url }}"
-          curl -sSL --fail -o test-apks/target.bin "${{ inputs.apk_url }}" || {
-            echo "ERROR: download failed. Is the URL public and direct?"; exit 1; }
+          if [ -f test-apks/target.bin ]; then
+            echo "APK already present from cache - skipping download."
+          else
+            echo "Downloading APK from storage..."
+            curl -fL "$APK_URL" -o test-apks/target.bin
+          fi
           ls -la test-apks/
-          file test-apks/target.bin
-          echo "--- what is inside it ---"
-          unzip -l test-apks/target.bin | head -30 || echo "(not a zip)"
 
       - name: Install Network Proxy and Prepare Certificate
         run: |
