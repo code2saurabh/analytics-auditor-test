@@ -111,10 +111,25 @@
   .hidden{display:none}
   details{margin-top:10px}
   summary{font-family:var(--mono);font-size:12px;cursor:pointer;color:var(--accent)}
+  /* run-an-audit panel */
+  .fieldlabel{display:block;font-family:var(--mono);font-size:11px;letter-spacing:.1em;text-transform:uppercase;
+              color:var(--ink-3);font-weight:700;margin:22px 0 8px}
+  .fieldlabel span{text-transform:none;letter-spacing:0;font-weight:400;color:var(--ink-3)}
+  #apkdrop{border:2px dashed var(--rule-2);border-radius:3px;padding:38px 20px;text-align:center;
+           cursor:pointer;background:var(--card);transition:border-color .15s,background .15s}
+  #apkdrop:hover,#apkdrop.over{border-color:var(--accent);background:#f4f8f7}
+  #apkdrop b{font-size:16px;display:block}
+  #apkdrop span{font-size:13px;color:var(--ink-3)}
+  .bar{height:8px;background:#e3e8e7;border-radius:99px;overflow:hidden}
+  .barfill{height:100%;width:0;background:var(--accent);transition:width .4s ease}
+  .barfill.err{background:var(--missing)}
+  .barfill.done{background:var(--fired)}
+  .statusline{font-family:var(--mono);font-size:12.5px;color:var(--ink-2);margin-top:10px;line-height:1.7;white-space:pre-line}
+  .btn:disabled{opacity:.45;cursor:not-allowed}
   @media print{
     body{background:#fff;padding:0}
     header{padding-top:0}
-    #spec-section,#load-section,.btn,#drop,.or{display:none!important}
+    #run-section,#spec-section,#load-section,.btn,#drop,.or{display:none!important}
   }
 </style>
 </head>
@@ -126,6 +141,37 @@
     <h1>Analytics Auditor</h1>
     <p class="standfirst">Say what the app is supposed to send. Give it a recording of what the app actually sent. It tells you the difference.</p>
   </header>
+
+  <section id="run-section">
+    <div class="step">
+      <span class="step-n">RUN</span>
+      <h2>Audit an app</h2>
+      <span class="step-note">Upload an APK &middot; it runs itself</span>
+    </div>
+    <div class="card">
+      <div id="apkdrop">
+        <b>Drop an .apk or .apkm here</b>
+        <span>or click to choose one &middot; any size</span>
+        <input type="file" id="apkfile" accept=".apk,.apkm,.xapk,.apks" class="hidden">
+      </div>
+      <p class="hint" id="apkchosen" style="display:none"></p>
+
+      <label class="fieldlabel" for="journey">Journey <span>&mdash; the taps to perform, one per line or separated by ;</span></label>
+      <textarea id="journey" spellcheck="false" placeholder="tap Accept&#10;wait 3&#10;tap Search&#10;type shoes&#10;key enter"></textarea>
+      <p class="hint">Verbs: <code>tap TEXT</code>, <code>tapat top-right</code>, <code>type WORDS</code>, <code>wait N</code>, <code>key back</code>.
+        Leave blank to just launch the app and auto-dismiss a consent popup.</p>
+
+      <div style="margin-top:16px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+        <button class="btn" id="startrun" disabled>Start audit</button>
+        <span class="hint" id="starthint" style="margin:0">Choose an APK to begin.</span>
+      </div>
+
+      <div id="runstatus" style="display:none;margin-top:20px">
+        <div class="bar"><div class="barfill" id="barfill"></div></div>
+        <div class="statusline" id="statusline"></div>
+      </div>
+    </div>
+  </section>
 
   <section id="spec-section">
     <div class="step">
@@ -695,6 +741,136 @@ const SAMPLE = { log: { entries: [
   ["2026-07-16T23:00:47.200Z","GET",200,"https://example.com/?auditor=172604"],
   ["2026-07-16T23:00:47.300Z","GET",404,"https://app-measurement.com/?auditor=172604"]
 ].map(([t, m, s, u]) => ({ startedDateTime: t, request: { method: m, url: u }, response: { status: s } })) } };
+
+// ============================================================================
+//  Run an audit: upload APK -> GitHub runs it -> pull result -> analyze.
+//  This is the capture half. Everything above is the analysis half, unchanged:
+//  when a run finishes we just feed its dump.har into run() like any recording.
+// ============================================================================
+const WORKER = "https://analytics-auditor.saurabhgodara02.workers.dev";
+let apkFile = null;
+
+const apkdrop = $('apkdrop'), apkfile = $('apkfile');
+apkdrop.onclick = () => apkfile.click();
+apkdrop.ondragover = e => { e.preventDefault(); apkdrop.classList.add('over'); };
+apkdrop.ondragleave = () => apkdrop.classList.remove('over');
+apkdrop.ondrop = e => { e.preventDefault(); apkdrop.classList.remove('over');
+  if (e.dataTransfer.files[0]) pickApk(e.dataTransfer.files[0]); };
+apkfile.onchange = e => { if (e.target.files[0]) pickApk(e.target.files[0]); };
+
+function pickApk(f){
+  apkFile = f;
+  const mb = (f.size / 1048576).toFixed(1);
+  $('apkchosen').style.display = 'block';
+  $('apkchosen').textContent = `Chosen: ${f.name} (${mb} MB)`;
+  $('startrun').disabled = false;
+  $('starthint').textContent = 'Ready. Type a journey above if you want one.';
+}
+
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const fmtElapsed = s => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+function stage(pct, text, cls){
+  $('runstatus').style.display = 'block';
+  const bf = $('barfill');
+  bf.style.width = pct + '%';
+  bf.className = 'barfill' + (cls ? ' ' + cls : '');
+  $('statusline').textContent = text;
+}
+
+$('startrun').onclick = async () => {
+  if (!apkFile) return;
+  $('startrun').disabled = true;
+  try {
+    stage(8, 'Requesting a secure upload link\u2026');
+    const pre = await fetch(WORKER + '/presign', { method: 'POST' }).then(r => r.json());
+    if (!pre.uploadUrl) throw new Error('could not get an upload link');
+
+    stage(20, `Uploading ${apkFile.name} to storage\u2026 (large files take a moment)`);
+    const up = await fetch(pre.uploadUrl, { method: 'PUT', body: apkFile });
+    if (!up.ok) throw new Error('upload failed (HTTP ' + up.status + ')');
+
+    stage(34, 'Starting the run on GitHub\u2026');
+    const st = await fetch(WORKER + '/start', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key: pre.key, journey: $('journey').value })
+    }).then(r => r.json());
+    if (!st.ok) throw new Error('could not start the run');
+
+    const since = st.since, t0 = Date.now();
+    let runId = null, status = 'queued';
+    for (let i = 0; i < 120; i++){          // poll ~15s x 120 = up to 30 min
+      await sleep(15000);
+      const el = Math.round((Date.now() - t0) / 1000);
+      const s = await fetch(WORKER + `/status?since=${encodeURIComponent(since)}`).then(r => r.json());
+      status = s.status || 'queued'; runId = s.runId;
+      const label = status === 'queued' ? 'Waiting for a runner'
+                  : status === 'in_progress' ? 'Running the emulator and journey'
+                  : status;
+      stage(40 + Math.min(45, i * 3), `${label}\u2026  (${fmtElapsed(el)} elapsed)`);
+      if (status === 'completed'){
+        if (s.conclusion && s.conclusion !== 'success')
+          stage(85, `Run finished as "${s.conclusion}". Reading whatever was captured\u2026`, 'err');
+        break;
+      }
+    }
+    if (status !== 'completed') throw new Error('timed out waiting for the run');
+    if (!runId) throw new Error('run finished but no run id came back');
+
+    stage(90, 'Downloading the result\u2026');
+    const zipBuf = await fetch(WORKER + `/result?runId=${runId}`).then(r => r.arrayBuffer());
+
+    stage(96, 'Unpacking the recording\u2026');
+    const harText = await extractFromZip(new Uint8Array(zipBuf), 'dump.har');
+    const har = JSON.parse(harText);
+
+    stage(100, 'Done. Verdict is below.', 'done');
+    run(har, `audit-${runId}.har`);
+    $('report').scrollIntoView({ behavior: 'smooth' });
+  } catch (err){
+    stage(100, 'Stopped: ' + (err && err.message || err) +
+      '\nYou can still grab the result from the Actions tab, or drop a HAR below.', 'err');
+  } finally {
+    $('startrun').disabled = false;
+  }
+};
+
+// Pull one file out of a GitHub artifact zip, entirely in the browser.
+// GitHub always zips artifacts (deflate), so we read the central directory,
+// find the entry ending in dump.har, and inflate just that one.
+async function inflateRaw(bytes){
+  const s = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
+  return new Uint8Array(await new Response(s).arrayBuffer());
+}
+async function extractFromZip(bytes, wantSuffix){
+  const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  let eocd = -1;
+  for (let i = bytes.length - 22; i >= 0; i--){
+    if (dv.getUint32(i, true) === 0x06054b50){ eocd = i; break; }
+  }
+  if (eocd < 0) throw new Error('result was not a valid zip');
+  const count = dv.getUint16(eocd + 10, true);
+  let p = dv.getUint32(eocd + 16, true);
+  for (let n = 0; n < count; n++){
+    if (dv.getUint32(p, true) !== 0x02014b50) break;
+    const method = dv.getUint16(p + 10, true);
+    const compSz = dv.getUint32(p + 20, true);
+    const fnLen  = dv.getUint16(p + 28, true);
+    const exLen  = dv.getUint16(p + 30, true);
+    const cmLen  = dv.getUint16(p + 32, true);
+    const lho    = dv.getUint32(p + 42, true);
+    const name   = new TextDecoder().decode(bytes.subarray(p + 46, p + 46 + fnLen));
+    if (name.endsWith(wantSuffix)){
+      const lfn = dv.getUint16(lho + 26, true);
+      const lex = dv.getUint16(lho + 28, true);
+      const start = lho + 30 + lfn + lex;
+      const data = bytes.subarray(start, start + compSz);
+      const raw = method === 8 ? await inflateRaw(data) : data;
+      return new TextDecoder().decode(raw);
+    }
+    p += 46 + fnLen + exLen + cmLen;
+  }
+  throw new Error('no dump.har inside the result');
+}
 </script>
 </body>
 </html>
