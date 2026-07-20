@@ -748,7 +748,30 @@ const SAMPLE = { log: { entries: [
 //  when a run finishes we just feed its dump.har into run() like any recording.
 // ============================================================================
 const WORKER = "https://analytics-auditor.saurabhgodara02.workers.dev";
-let apkFile = null;
+let apkFile = null;          // a file chosen this session (needs uploading)
+let reuseKey = null;         // storage key of a file already uploaded earlier
+let reuseName = "";
+
+// Remember / recall the last upload, so a failed run does not cost another upload.
+function saveLastUpload(key, name, size){
+  reuseKey = key; reuseName = name;
+  try { localStorage.setItem('lastUpload', JSON.stringify({ key, name, size, ts: Date.now() })); } catch(e){}
+}
+function loadLastUpload(){
+  try {
+    const r = JSON.parse(localStorage.getItem('lastUpload') || 'null');
+    // Storage auto-deletes uploads after a day, so ignore anything older than ~20h.
+    if (r && Date.now() - r.ts < 20 * 60 * 60 * 1000){
+      reuseKey = r.key; reuseName = r.name;
+      $('startrun').disabled = false;
+      $('starthint').innerHTML = `Ready to reuse <b>${esc(reuseName)}</b>, or drop a new APK. <a href="#" id="clearreuse">forget it</a>`;
+      $('clearreuse').onclick = ev => { ev.preventDefault();
+        reuseKey = null; reuseName = ""; try { localStorage.removeItem('lastUpload'); } catch(e){}
+        $('startrun').disabled = true; $('starthint').textContent = 'Choose an APK to begin.'; };
+    }
+  } catch(e){}
+}
+loadLastUpload();
 
 const apkdrop = $('apkdrop'), apkfile = $('apkfile');
 apkdrop.onclick = () => apkfile.click();
@@ -760,11 +783,12 @@ apkfile.onchange = e => { if (e.target.files[0]) pickApk(e.target.files[0]); };
 
 function pickApk(f){
   apkFile = f;
+  reuseKey = null;            // a freshly chosen file overrides any remembered upload
   const mb = (f.size / 1048576).toFixed(1);
   $('apkchosen').style.display = 'block';
   $('apkchosen').textContent = `Chosen: ${f.name} (${mb} MB)`;
   $('startrun').disabled = false;
-  $('starthint').textContent = 'Ready. Type a journey above if you want one.';
+  $('starthint').textContent = 'Ready. This file will be uploaded fresh.';
 }
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -778,21 +802,30 @@ function stage(pct, text, cls){
 }
 
 $('startrun').onclick = async () => {
-  if (!apkFile) return;
+  if (!apkFile && !reuseKey) return;
   $('startrun').disabled = true;
   try {
-    stage(8, 'Requesting a secure upload link\u2026');
-    const pre = await fetch(WORKER + '/presign', { method: 'POST' }).then(r => r.json());
-    if (!pre.uploadUrl) throw new Error('could not get an upload link');
+    let key;
+    if (apkFile){
+      stage(8, 'Requesting a secure upload link\u2026');
+      const pre = await fetch(WORKER + '/presign', { method: 'POST' }).then(r => r.json());
+      if (!pre.uploadUrl) throw new Error('could not get an upload link');
 
-    stage(20, `Uploading ${apkFile.name} to storage\u2026 (large files take a moment)`);
-    const up = await fetch(pre.uploadUrl, { method: 'PUT', body: apkFile });
-    if (!up.ok) throw new Error('upload failed (HTTP ' + up.status + ')');
+      stage(20, `Uploading ${apkFile.name} to storage\u2026 (large files take a moment)`);
+      const up = await fetch(pre.uploadUrl, { method: 'PUT', body: apkFile });
+      if (!up.ok) throw new Error('upload failed (HTTP ' + up.status + ')');
+
+      key = pre.key;
+      saveLastUpload(key, apkFile.name, apkFile.size);
+    } else {
+      stage(20, `Reusing ${reuseName} \u2014 already in storage, skipping upload\u2026`);
+      key = reuseKey;
+    }
 
     stage(34, 'Starting the run on GitHub\u2026');
     const st = await fetch(WORKER + '/start', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ key: pre.key, journey: $('journey').value })
+      body: JSON.stringify({ key: key, journey: $('journey').value })
     }).then(r => r.json());
     if (!st.ok) throw new Error('could not start the run');
 
