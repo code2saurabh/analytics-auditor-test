@@ -173,6 +173,5 @@ jobs:
           name: audit-results
           path: |
             dump.har
-            dump.mitm
             firebase.log
             mitm.log
