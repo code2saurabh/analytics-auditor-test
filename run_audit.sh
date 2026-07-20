@@ -2,25 +2,17 @@
 set -x
 
 # ============================================================================
-#  Screen-reading tapper  (RACE-PROOF version)
+#  Screen-reading tapper (RACE-PROOF) + corner tapper + timeout-guarded logs.
 #
-#  The old tapper looked at the screen ONCE. If the button we wanted had not
-#  loaded yet (OLX fetches its 454-partner consent list over the network before
-#  drawing it), the one look found nothing, printed SKIP, and moved on. The wall
-#  then appeared with nothing left to dismiss it. That is the consent-wall bug.
-#
-#  This version WAITS for the button. It re-checks the screen every couple of
-#  seconds until the element appears, taps it, and only fails after a timeout.
-#  It cannot race a slow-loading screen, and it fixes this for every app, not
-#  just OLX, because every app has some screen that loads slower than expected.
+#  tap    waits for a button to appear, then taps it (fixes the consent race).
+#  tapat  taps a screen corner by position, for unlabelled icons (eBay's X).
+#  Log collection is wrapped in `timeout` so a flaky emulator that drops its
+#  connection at the end can never hang the whole run; we still write the HAR.
 # ============================================================================
 
-# How long a single "tap" step will wait for its target before giving up.
-# Bump this (or set it in the workflow) if a consent screen is ever slower.
-TAP_TIMEOUT="${TAP_TIMEOUT:-30}"
+TAP_TIMEOUT="${TAP_TIMEOUT:-30}"   # how long a "tap" waits for its target
 
-# ui_dump : take a fresh snapshot of everything on screen into ./ui.xml
-# uiautomator can fail mid-animation, so we try a few times before giving up.
+# ui_dump : snapshot everything on screen into ./ui.xml (retry on animation)
 ui_dump() {
   for _ in 1 2 3 4 5; do
     adb shell uiautomator dump /sdcard/ui.xml >/dev/null 2>&1
@@ -31,10 +23,8 @@ ui_dump() {
   return 1
 }
 
-# find_xy "some words" : from the current ./ui.xml, print "x y" of the centre
-# of the first element whose text or content-desc contains those words.
+# find_xy "words" : print "x y" of the centre of the first matching element.
 # Accent- and case-insensitive, so "Akceptuje" matches "Akceptuję".
-# Prints nothing if not found.
 find_xy() {
   python3 - "$1" <<'PYE'
 import sys, re, unicodedata
@@ -60,8 +50,7 @@ for m in re.finditer(r'<node[^>]*?>', xml):
 PYE
 }
 
-# tap_once "some words" : one look, one tap. Returns 0 if it tapped, 1 if not.
-# Used by the consent fallback where we cycle through many words quickly.
+# tap_once : one look, one tap. 0 if tapped, 1 if not found.
 tap_once() {
   ui_dump || return 1
   local coords
@@ -74,10 +63,7 @@ tap_once() {
   return 1
 }
 
-# wait_and_tap "some words" [timeout] : THE FIX.
-# Keep re-checking the screen until the element appears, then tap it.
-# Fails only after 'timeout' seconds, and on failure saves the screen it gave
-# up on (ui-fail-*.xml + a screenshot) so you can see exactly why.
+# wait_and_tap : keep re-checking until the element appears, then tap it.
 wait_and_tap() {
   local want="$1" timeout="${2:-$TAP_TIMEOUT}" waited=0
   while [ "$waited" -lt "$timeout" ]; do
@@ -95,19 +81,23 @@ wait_and_tap() {
   return 1
 }
 
-# dismiss_consent : keep trying a list of common consent words for a while,
-# so a slow-loading consent screen still gets dismissed when no journey is given.
-dismiss_consent() {
-  local waited=0
-  while [ "$waited" -lt "$TAP_TIMEOUT" ]; do
-    for word in Accept Akceptuje Agree Zgadzam Allow OK Continue Got; do
-      tap_once "$word" && return 0
-    done
-    sleep 2
-    waited=$((waited + 2))
-  done
-  echo "No consent dialog dismissed within ${TAP_TIMEOUT}s."
-  return 1
+# tapat : tap a screen corner by position, for icons that have no text.
+#   positions: top-left  top-right  bottom-left  bottom-right  center
+tapat() {
+  local pos="$1" size w h x y
+  size=$(adb shell wm size | tr -d '\r' | grep -oE '[0-9]+x[0-9]+' | tail -1)
+  w=${size%x*}; h=${size#*x}
+  if [ -z "$w" ] || [ -z "$h" ]; then echo "tapat: could not read screen size"; return 1; fi
+  case "$pos" in
+    top-left)     x=$((w*8/100));  y=$((h*6/100))  ;;
+    top-right)    x=$((w*92/100)); y=$((h*6/100))  ;;
+    bottom-left)  x=$((w*8/100));  y=$((h*94/100)) ;;
+    bottom-right) x=$((w*92/100)); y=$((h*94/100)) ;;
+    center)       x=$((w/2));      y=$((h/2))      ;;
+    *) echo "tapat: unknown position '$pos'"; return 1 ;;
+  esac
+  echo "TAPAT $pos at $x $y"
+  adb shell input tap $x $y
 }
 
 # type_text "words" : type into whatever field is focused.
@@ -149,8 +139,6 @@ TARGET=test-apks/target.bin
 INSTALL_OK=1
 
 if [ -f "$TARGET" ]; then
-  # An .apkm / .xapk / .apks bundle is a zip CONTAINING .apk files.
-  # A plain .apk is also a zip, but has no .apk files inside it. That is the test.
   if unzip -l "$TARGET" | grep -q "\.apk\s*$"; then
     echo "Bundle detected - unpacking split APKs"
     mkdir -p /tmp/splits && unzip -o -q "$TARGET" -d /tmp/splits
@@ -176,7 +164,6 @@ if [ "$INSTALL_OK" = "0" ]; then
 fi
 
 echo "=== Which package did we just install? ==="
-# -3 lists only user-installed apps, so we ignore everything Google ships.
 PKG=$(adb shell pm list packages -3 | sed 's/package://' | tr -d '\r' | grep -v analyticsauditor | head -1)
 if [ -z "$PKG" ]; then
   PKG=$(adb shell pm list packages -3 | sed 's/package://' | tr -d '\r' | head -1)
@@ -189,7 +176,6 @@ fi
 echo "PACKAGE UNDER TEST: $PKG"
 
 echo "=== Firebase debug mode for that package ==="
-# Harmless if the app does not use Firebase.
 adb shell setprop debug.firebase.analytics.app "$PKG"
 adb shell setprop log.tag.FA VERBOSE
 adb shell setprop log.tag.FA-SVC VERBOSE
@@ -210,22 +196,22 @@ else
 fi
 
 echo "=== Running the journey ==="
-# JOURNEY_STEPS comes in from the workflow as one instruction per line.
-# Each line is either:   tap Some Text       (WAIT for that text, then tap it)
-#                        type some words     (type into the focused field)
-#                        wait 3              (pause N seconds)
-#                        key back            (press a hardware key)
-# If no steps were supplied, fall back to just dismissing a consent dialog.
+# Verbs:  tap <text>   wait for that text, tap it
+#         tapat <pos>  tap a corner (top-left/top-right/bottom-left/bottom-right/center)
+#         type <words> type into the focused field
+#         wait <n>     pause n seconds
+#         key <name>   press a hardware key (back, enter, home)
 STEP_NUM=0
 run_step() {
   local verb="$1"; shift
   local arg="$*"
   case "$verb" in
-    tap)  wait_and_tap "$arg" || true ;;
-    type) type_text "$arg" ;;
-    wait) sleep "${arg:-2}" ;;
-    key)  adb shell input keyevent "KEYCODE_$(echo "$arg" | tr a-z A-Z)" ;;
-    *)    echo "unknown step: $verb $arg" ;;
+    tap)   wait_and_tap "$arg" || true ;;
+    tapat) tapat "$arg" || true ;;
+    type)  type_text "$arg" ;;
+    wait)  sleep "${arg:-2}" ;;
+    key)   adb shell input keyevent "KEYCODE_$(echo "$arg" | tr a-z A-Z)" ;;
+    *)     echo "unknown step: $verb $arg" ;;
   esac
   STEP_NUM=$((STEP_NUM+1))
   sleep 2
@@ -242,20 +228,26 @@ if [ -n "$JOURNEY_STEPS" ]; then
     run_step "$verb" "$rest"
   done
 else
-  echo "No journey supplied - just trying to dismiss a consent dialog."
-  dismiss_consent || true
+  echo "No journey supplied - trying to dismiss a consent dialog."
+  waited=0
+  while [ "$waited" -lt "$TAP_TIMEOUT" ]; do
+    for word in Accept Akceptuje Agree Zgadzam Allow OK Continue Got; do
+      tap_once "$word" && break 2
+    done
+    sleep 2; waited=$((waited + 2))
+  done
 fi
 
 sleep 5
 adb exec-out screencap -p > screen-2-after-journey.png
 
 echo "=== Backgrounding, then leaving the SDK alone to flush ==="
-adb shell input keyevent KEYCODE_HOME
+adb shell input keyevent KEYCODE_HOME || true
 sleep 60
 
-echo "=== Logs ==="
-adb logcat -d -s FA:V FA-SVC:V > firebase.log 2>&1 || true
-adb logcat -d -s AndroidRuntime:E ActivityManager:E > crash.log 2>&1 || true
+echo "=== Logs (timeout-guarded so a dead emulator cannot hang the run) ==="
+timeout -k 10 60 adb logcat -d -s FA:V FA-SVC:V > firebase.log 2>&1 || true
+timeout -k 10 60 adb logcat -d -s AndroidRuntime:E ActivityManager:E > crash.log 2>&1 || true
 echo "--- last 20 lines of Firebase log ---"
 tail -20 firebase.log || true
 echo "--- any crashes ---"
