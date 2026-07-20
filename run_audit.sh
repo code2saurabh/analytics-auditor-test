@@ -258,4 +258,5 @@ echo "=== Stopping the recorder and writing the HAR ==="
 kill $PROXY_PID || true
 sleep 3
 HAR_OUT=dump.har mitmdump -r dump.mitm -s har_dump.py -q || true
+rm -f dump.mitm
 ls -la dump.har dump.mitm firebase.log crash.log screen-*.png ui-fail-*.xml || true
