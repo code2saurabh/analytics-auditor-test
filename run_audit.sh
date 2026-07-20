@@ -2,33 +2,50 @@
 set -x
 
 # ============================================================================
-#  Screen-reading tapper.
-#  Instead of tapping random pixels, we ask Android for a dump of everything
-#  on screen (text + coordinates), find the element whose text matches what we
-#  want, and tap the centre of its box. This works on any screen size and any
-#  app, because it finds things by their words, not by fixed pixels.
+#  Screen-reading tapper  (RACE-PROOF version)
+#
+#  The old tapper looked at the screen ONCE. If the button we wanted had not
+#  loaded yet (OLX fetches its 454-partner consent list over the network before
+#  drawing it), the one look found nothing, printed SKIP, and moved on. The wall
+#  then appeared with nothing left to dismiss it. That is the consent-wall bug.
+#
+#  This version WAITS for the button. It re-checks the screen every couple of
+#  seconds until the element appears, taps it, and only fails after a timeout.
+#  It cannot race a slow-loading screen, and it fixes this for every app, not
+#  just OLX, because every app has some screen that loads slower than expected.
 # ============================================================================
 
-# tap_text "some words"  -> finds an element containing those words, taps it.
-# Returns 0 if it tapped something, 1 if it found nothing.
-tap_text() {
-  local want="$1"
-  adb shell uiautomator dump /sdcard/ui.xml >/dev/null 2>&1
-  adb pull /sdcard/ui.xml /tmp/ui.xml >/dev/null 2>&1
-  # Find the first node whose text= or content-desc= contains $want (case-insensitive),
-  # and read its bounds="[x1,y1][x2,y2]". Then tap the centre.
-  local coords
-  coords=$(python3 - "$want" <<'PYE'
+# How long a single "tap" step will wait for its target before giving up.
+# Bump this (or set it in the workflow) if a consent screen is ever slower.
+TAP_TIMEOUT="${TAP_TIMEOUT:-30}"
+
+# ui_dump : take a fresh snapshot of everything on screen into ./ui.xml
+# uiautomator can fail mid-animation, so we try a few times before giving up.
+ui_dump() {
+  for _ in 1 2 3 4 5; do
+    adb shell uiautomator dump /sdcard/ui.xml >/dev/null 2>&1
+    adb pull /sdcard/ui.xml ui.xml >/dev/null 2>&1
+    [ -s ui.xml ] && return 0
+    sleep 1
+  done
+  return 1
+}
+
+# find_xy "some words" : from the current ./ui.xml, print "x y" of the centre
+# of the first element whose text or content-desc contains those words.
+# Accent- and case-insensitive, so "Akceptuje" matches "Akceptuję".
+# Prints nothing if not found.
+find_xy() {
+  python3 - "$1" <<'PYE'
 import sys, re, unicodedata
 def flat(t):
-    # strip accents so "Akceptuje" matches "Akceptuje" with a tail, etc.
-    t = unicodedata.normalize('NFKD', t)
-    return ''.join(c for c in t if not unicodedata.combining(c)).lower()
+    t = unicodedata.normalize('NFKD', t or '')
+    return ''.join(c for c in t if not unicodedata.combining(c)).casefold()
 want = flat(sys.argv[1])
 try:
-    xml = open('/tmp/ui.xml', encoding='utf-8').read()
+    xml = open('ui.xml', encoding='utf-8').read()
 except Exception:
-    print(""); sys.exit()
+    sys.exit()
 for m in re.finditer(r'<node[^>]*?>', xml):
     tag = m.group(0)
     tm = re.search(r'text="([^"]*)"', tag)
@@ -37,22 +54,63 @@ for m in re.finditer(r'<node[^>]*?>', xml):
     if want in hay and hay.strip():
         bm = re.search(r'bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"', tag)
         if bm:
-            x1,y1,x2,y2 = map(int, bm.groups())
-            print(f"{(x1+x2)//2} {(y1+y2)//2}")
+            x1, y1, x2, y2 = map(int, bm.groups())
+            print(f"{(x1 + x2) // 2} {(y1 + y2) // 2}")
             break
 PYE
-)
-  if [ -n "$coords" ]; then
-    echo "TAP  '$want'  at  $coords"
-    adb shell input tap $coords
-    return 0
-  else
-    echo "SKIP '$want'  (not found on screen)"
-    return 1
-  fi
 }
 
-# type_text "words"  -> types into whatever field is focused.
+# tap_once "some words" : one look, one tap. Returns 0 if it tapped, 1 if not.
+# Used by the consent fallback where we cycle through many words quickly.
+tap_once() {
+  ui_dump || return 1
+  local coords
+  coords="$(find_xy "$1")"
+  if [ -n "$coords" ]; then
+    echo "TAP  '$1'  at  $coords"
+    adb shell input tap $coords
+    return 0
+  fi
+  return 1
+}
+
+# wait_and_tap "some words" [timeout] : THE FIX.
+# Keep re-checking the screen until the element appears, then tap it.
+# Fails only after 'timeout' seconds, and on failure saves the screen it gave
+# up on (ui-fail-*.xml + a screenshot) so you can see exactly why.
+wait_and_tap() {
+  local want="$1" timeout="${2:-$TAP_TIMEOUT}" waited=0
+  while [ "$waited" -lt "$timeout" ]; do
+    if tap_once "$want"; then
+      echo "     (found after ${waited}s)"
+      return 0
+    fi
+    sleep 2
+    waited=$((waited + 2))
+  done
+  echo "FAIL '$want'  never appeared within ${timeout}s"
+  local safe="${want// /_}"
+  cp ui.xml "ui-fail-${safe}.xml" 2>/dev/null || true
+  adb exec-out screencap -p > "ui-fail-${safe}.png" 2>/dev/null || true
+  return 1
+}
+
+# dismiss_consent : keep trying a list of common consent words for a while,
+# so a slow-loading consent screen still gets dismissed when no journey is given.
+dismiss_consent() {
+  local waited=0
+  while [ "$waited" -lt "$TAP_TIMEOUT" ]; do
+    for word in Accept Akceptuje Agree Zgadzam Allow OK Continue Got; do
+      tap_once "$word" && return 0
+    done
+    sleep 2
+    waited=$((waited + 2))
+  done
+  echo "No consent dialog dismissed within ${TAP_TIMEOUT}s."
+  return 1
+}
+
+# type_text "words" : type into whatever field is focused.
 type_text() {
   echo "TYPE '$1'"
   adb shell input text "$(echo "$1" | sed 's/ /%s/g')"
@@ -153,7 +211,7 @@ fi
 
 echo "=== Running the journey ==="
 # JOURNEY_STEPS comes in from the workflow as one instruction per line.
-# Each line is either:   tap Some Text       (find that text on screen, tap it)
+# Each line is either:   tap Some Text       (WAIT for that text, then tap it)
 #                        type some words     (type into the focused field)
 #                        wait 3              (pause N seconds)
 #                        key back            (press a hardware key)
@@ -163,7 +221,7 @@ run_step() {
   local verb="$1"; shift
   local arg="$*"
   case "$verb" in
-    tap)  tap_text "$arg" || true ;;
+    tap)  wait_and_tap "$arg" || true ;;
     type) type_text "$arg" ;;
     wait) sleep "${arg:-2}" ;;
     key)  adb shell input keyevent "KEYCODE_$(echo "$arg" | tr a-z A-Z)" ;;
@@ -185,9 +243,7 @@ if [ -n "$JOURNEY_STEPS" ]; then
   done
 else
   echo "No journey supplied - just trying to dismiss a consent dialog."
-  for word in Accept Akceptuje Agree Zgadzam Allow OK Continue Got; do
-    tap_text "$word" && break
-  done
+  dismiss_consent || true
 fi
 
 sleep 5
@@ -209,4 +265,4 @@ echo "=== Stopping the recorder and writing the HAR ==="
 kill $PROXY_PID || true
 sleep 3
 HAR_OUT=dump.har mitmdump -r dump.mitm -s har_dump.py -q || true
-ls -la dump.har dump.mitm firebase.log crash.log screen-*.png || true
+ls -la dump.har dump.mitm firebase.log crash.log screen-*.png ui-fail-*.xml || true
