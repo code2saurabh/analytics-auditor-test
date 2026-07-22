@@ -17,6 +17,13 @@ jobs:
       - name: Generate Xcode project
         run: xcodegen generate
 
+      - name: Downgrade project file format for Xcode 15.4
+        run: |
+          # Newer XcodeGen writes objectVersion 77, which Xcode 15.4 cannot open.
+          # Rewrite it to 56, the format this Xcode understands.
+          sed -i '' 's/objectVersion = 77;/objectVersion = 56;/' AnalyticsAuditor.xcodeproj/project.pbxproj
+          grep -m1 objectVersion AnalyticsAuditor.xcodeproj/project.pbxproj
+
       - name: Build for the iOS Simulator (arm64 + x86_64)
         run: |
           xcodebuild \
