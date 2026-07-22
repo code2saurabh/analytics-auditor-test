@@ -1,6 +1,7 @@
 name: AnalyticsAuditor
 options:
   bundleIdPrefix: com.example
+  compatibilityVersion: "14.0"
   deploymentTarget:
     iOS: "15.0"
 targets:
