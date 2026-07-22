@@ -1,0 +1,44 @@
+name: iOS Test App Build
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-14
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Build for the iOS Simulator (arm64 + x86_64)
+        run: |
+          xcodebuild \
+            -project AnalyticsAuditor.xcodeproj \
+            -scheme AnalyticsAuditor \
+            -sdk iphonesimulator \
+            -configuration Debug \
+            -derivedDataPath build \
+            ARCHS="x86_64 arm64" ONLY_ACTIVE_ARCH=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+
+      - name: Zip the .app for Appetize
+        run: |
+          APP=$(find build -name "*.app" -type d | head -1)
+          echo "Found app bundle: $APP"
+          cd "$(dirname "$APP")"
+          zip -r -y "$GITHUB_WORKSPACE/AnalyticsAuditor.app.zip" "$(basename "$APP")"
+          ls -la "$GITHUB_WORKSPACE/AnalyticsAuditor.app.zip"
+
+      - name: Upload the .app zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-app
+          path: AnalyticsAuditor.app.zip
