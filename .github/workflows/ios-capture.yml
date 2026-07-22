@@ -1,0 +1,158 @@
+name: iOS Capture Test
+
+on:
+  workflow_dispatch:
+
+jobs:
+  capture:
+    runs-on: macos-14
+    timeout-minutes: 40
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install XcodeGen and mitmproxy
+        run: brew install xcodegen mitmproxy
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Downgrade project format so Xcode can open it
+        run: |
+          sed -i '' 's/objectVersion = 77;/objectVersion = 56;/' AnalyticsAuditor.xcodeproj/project.pbxproj || true
+          grep -m1 objectVersion AnalyticsAuditor.xcodeproj/project.pbxproj
+
+      - name: Build the .app for the simulator
+        run: |
+          xcodebuild \
+            -project AnalyticsAuditor.xcodeproj \
+            -scheme AnalyticsAuditor \
+            -sdk iphonesimulator \
+            -configuration Debug \
+            -derivedDataPath build \
+            ARCHS="x86_64 arm64" ONLY_ACTIVE_ARCH=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+          echo "APP_PATH=$(find build -name '*.app' -type d | head -1)" >> "$GITHUB_ENV"
+
+      - name: Write the HAR converter
+        run: |
+          cat > har_dump.py <<'PY'
+          import base64, datetime, json, os
+          flows = []
+          MAX_BODY = 512 * 1024
+          def response(flow):
+              flows.append(flow)
+          def _body(raw, ctype):
+              if not raw: return None
+              raw = raw[:MAX_BODY]
+              try: return {"mimeType": ctype, "text": raw.decode("utf-8")}
+              except UnicodeDecodeError:
+                  return {"mimeType": ctype, "text": base64.b64encode(raw).decode(), "encoding": "base64"}
+          def done():
+              har = {"log": {"version": "1.2", "creator": {"name": "analytics-auditor", "version": "2.0"}, "entries": []}}
+              for f in flows:
+                  if f.response is None: continue
+                  start = f.request.timestamp_start or 0
+                  end = f.response.timestamp_end or start
+                  started = datetime.datetime.fromtimestamp(start, datetime.timezone.utc)
+                  req = {"method": f.request.method, "url": f.request.pretty_url,
+                         "httpVersion": f.request.http_version, "cookies": [],
+                         "headers": [{"name": k, "value": v} for k, v in f.request.headers.items()],
+                         "queryString": [{"name": k, "value": v} for k, v in f.request.query.items()],
+                         "headersSize": -1, "bodySize": len(f.request.raw_content or b"")}
+                  pd = _body(f.request.raw_content, f.request.headers.get("content-type", ""))
+                  if pd: pd["params"] = []; req["postData"] = pd
+                  rb = _body(f.response.raw_content, f.response.headers.get("content-type", ""))
+                  res = {"status": f.response.status_code, "statusText": f.response.reason or "",
+                         "httpVersion": f.response.http_version, "cookies": [],
+                         "headers": [{"name": k, "value": v} for k, v in f.response.headers.items()],
+                         "content": rb or {"size": 0, "mimeType": "", "text": ""},
+                         "redirectURL": "", "headersSize": -1, "bodySize": len(f.response.raw_content or b"")}
+                  res["content"]["size"] = len(f.response.raw_content or b"")
+                  har["log"]["entries"].append({"startedDateTime": started.isoformat().replace("+00:00", "Z"),
+                      "time": round((end - start) * 1000, 2), "request": req, "response": res,
+                      "cache": {}, "timings": {"send": 0, "wait": round((end - start) * 1000, 2), "receive": 0}})
+              out = os.environ.get("HAR_OUT", "dump.har")
+              json.dump(har, open(out, "w"), indent=1)
+              print("HAR written to %s with %d entries" % (out, len(har["log"]["entries"])))
+          PY
+          echo "har_dump.py ready"
+
+      - name: Generate the mitmproxy certificate
+        run: |
+          mitmdump --quiet &
+          MP=$!
+          timeout 25 bash -c 'while [ ! -f ~/.mitmproxy/mitmproxy-ca-cert.pem ]; do sleep 1; done'
+          kill $MP || true
+          ls -la ~/.mitmproxy/
+
+      - name: Boot a simulator
+        run: |
+          UDID=$(xcrun simctl list devices available | grep -E "iPhone" | head -1 | grep -oE "[0-9A-Fa-f]{8}-([0-9A-Fa-f]{4}-){3}[0-9A-Fa-f]{12}")
+          if [ -z "$UDID" ]; then
+            RUNTIME=$(xcrun simctl list runtimes | grep -oE "com.apple.CoreSimulator.SimRuntime.iOS[^ ]*" | head -1)
+            UDID=$(xcrun simctl create capturephone "iPhone 15" "$RUNTIME")
+          fi
+          echo "SIM_UDID=$UDID" >> "$GITHUB_ENV"
+          xcrun simctl boot "$UDID" || true
+          xcrun simctl bootstatus "$UDID" -b
+          echo "Booted $UDID"
+
+      - name: Trust the mitmproxy certificate inside the simulator
+        run: |
+          xcrun simctl keychain "$SIM_UDID" add-root-cert ~/.mitmproxy/mitmproxy-ca-cert.pem
+          echo "Certificate trusted in the simulator."
+
+      - name: Route the Mac's network through mitmproxy
+        run: |
+          SVC=$(networksetup -listallnetworkservices | tail -n +2 | grep -v '\*' | head -1)
+          echo "NET_SVC=$SVC" >> "$GITHUB_ENV"
+          sudo networksetup -setwebproxy "$SVC" 127.0.0.1 8080
+          sudo networksetup -setsecurewebproxy "$SVC" 127.0.0.1 8080
+          echo "System proxy set on '$SVC'."
+
+      - name: Record, install, launch, capture
+        run: |
+          HAR_OUT=dump.har mitmdump -w dump.mitm -s har_dump.py > mitm.log 2>&1 &
+          echo $! > proxy.pid
+          sleep 4
+          xcrun simctl install "$SIM_UDID" "$APP_PATH"
+          xcrun simctl launch "$SIM_UDID" com.example.analyticsauditor.ios
+          echo "App launched. Waiting for it to fire events..."
+          sleep 20
+          xcrun simctl io "$SIM_UDID" screenshot screen.png || true
+          kill "$(cat proxy.pid)" || true
+          sleep 3
+          HAR_OUT=dump.har mitmdump -r dump.mitm -s har_dump.py -q || true
+
+      - name: Turn the Mac proxy back off
+        if: always()
+        run: |
+          sudo networksetup -setwebproxystate "$NET_SVC" off || true
+          sudo networksetup -setsecurewebproxystate "$NET_SVC" off || true
+
+      - name: Summarise what was captured
+        if: always()
+        run: |
+          if [ ! -f dump.har ]; then echo "No HAR produced."; exit 0; fi
+          python3 - <<'PY'
+          import json, collections, urllib.parse
+          d = json.load(open("dump.har")); es = d["log"]["entries"]
+          print("Captured", len(es), "requests")
+          h = collections.Counter(urllib.parse.urlparse(e["request"]["url"]).hostname or "?" for e in es)
+          for host, n in h.most_common(20): print("  %3d  %s" % (n, host))
+          ga = [e for e in es if "google-analytics.com/g/collect" in e["request"]["url"]]
+          print("\nGA4 g/collect hits (our app):", len(ga))
+          for e in ga: print("   ", e["request"]["url"][:90])
+          PY
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-capture
+          path: |
+            dump.har
+            screen.png
+            mitm.log
