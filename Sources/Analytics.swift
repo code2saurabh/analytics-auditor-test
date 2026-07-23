@@ -1,9 +1,22 @@
 import Foundation
+import FirebaseAnalytics
 
-// Sends a GA4 Measurement-Protocol style request. It is captured on the wire
-// the instant the button is pressed, so Appetize's proxy sees it right away and
-// the auditor website decodes v / tid / cid / en / custom params from the query.
 enum Analytics {
+
+    /// Logs through the Firebase SDK. Firebase batches these and uploads them to
+    /// app-measurement.com as a compressed binary blob. Launching the app with
+    /// -FIRDebugEnabled makes it upload within seconds instead of up to an hour.
+    static func sendFirebase(_ event: String, log: @escaping (String) -> Void) {
+        FirebaseAnalytics.Analytics.logEvent(event, parameters: [
+            "source": "ios_auditor_test" as NSObject,
+            "run_id": 1 as NSObject
+        ])
+        log("FIREBASE \(event)  queued")
+    }
+
+    /// Control sample: a plain GA4 Measurement Protocol hit, readable in the URL.
+    /// If this appears in the capture but the Firebase blob does not, we know the
+    /// problem is Firebase-specific and not the capture itself.
     static func send(_ event: String, log: @escaping (String) -> Void) {
         var comps = URLComponents(string: "https://www.google-analytics.com/g/collect")!
         comps.queryItems = [
@@ -16,12 +29,9 @@ enum Analytics {
             URLQueryItem(name: "_p",  value: "1")
         ]
         guard let url = comps.url else { return }
-        var req = URLRequest(url: url)
-        req.httpMethod = "GET"
-        URLSession.shared.dataTask(with: req) { _, resp, err in
+        URLSession.shared.dataTask(with: URLRequest(url: url)) { _, resp, err in
             if let err = err { log("ERR  \(event): \(err.localizedDescription)"); return }
-            let code = (resp as? HTTPURLResponse)?.statusCode ?? -1
-            log("SENT \(event)  ->  HTTP \(code)")
+            log("GA4  \(event)  ->  HTTP \((resp as? HTTPURLResponse)?.statusCode ?? -1)")
         }.resume()
     }
 }
