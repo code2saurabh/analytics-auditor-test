@@ -1,11 +1,13 @@
 import SwiftUI
+import FirebaseCore
 
-// The whole app. SwiftUI @main means no AppDelegate or scene wiring needed.
 @main
 struct AnalyticsAuditorApp: App {
+    init() {
+        // Reads GoogleService-Info.plist from the app bundle and starts Firebase.
+        FirebaseApp.configure()
+    }
     var body: some Scene {
-        WindowGroup {
-            ContentView()
-        }
+        WindowGroup { ContentView() }
     }
 }
