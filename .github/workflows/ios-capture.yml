@@ -83,7 +83,12 @@ jobs:
         run: |
           mitmdump --quiet &
           MP=$!
-          timeout 25 bash -c 'while [ ! -f ~/.mitmproxy/mitmproxy-ca-cert.pem ]; do sleep 1; done'
+          # Wait up to 25 seconds for the mitmproxy CA to be created
+          SECONDS_WAITED=0
+          while [ ! -f "$HOME/.mitmproxy/mitmproxy-ca-cert.pem" ] && [ "$SECONDS_WAITED" -lt 25 ]; do
+            sleep 1
+            SECONDS_WAITED=$((SECONDS_WAITED + 1))
+          done
           kill $MP || true
           ls -la ~/.mitmproxy/
 
@@ -107,6 +112,11 @@ jobs:
       - name: Route the Mac's network through mitmproxy
         run: |
           SVC=$(networksetup -listallnetworkservices | tail -n +2 | grep -v '\*' | head -1)
+          # If no service found, try common defaults
+          if [ -z "$SVC" ]; then
+            echo "No network service found from list — falling back to Wi-Fi"
+            SVC="Wi-Fi"
+          fi
           echo "NET_SVC=$SVC" >> "$GITHUB_ENV"
           sudo networksetup -setwebproxy "$SVC" 127.0.0.1 8080
           sudo networksetup -setsecurewebproxy "$SVC" 127.0.0.1 8080
@@ -129,8 +139,13 @@ jobs:
       - name: Turn the Mac proxy back off
         if: always()
         run: |
-          sudo networksetup -setwebproxystate "$NET_SVC" off || true
-          sudo networksetup -setsecurewebproxystate "$NET_SVC" off || true
+          if [ -n "$NET_SVC" ]; then
+            sudo networksetup -setwebproxystate "$NET_SVC" off || true
+            sudo networksetup -setsecurewebproxystate "$NET_SVC" off || true
+            echo "Proxy state cleared for $NET_SVC"
+          else
+            echo "NET_SVC not set; skipping proxy teardown"
+          fi
 
       - name: Summarise what was captured
         if: always()
