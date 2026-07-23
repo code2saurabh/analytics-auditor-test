@@ -180,17 +180,38 @@ jobs:
           sleep 4
           echo "Installing $APP_PATH"
           xcrun simctl install "$SIM_UDID" "$APP_PATH"
-          # -FIRDebugEnabled makes the Firebase SDK upload within seconds instead of
-          # batching for up to an hour. Harmless for apps that do not use Firebase.
-          xcrun simctl launch "$SIM_UDID" "$BUNDLE_ID" -FIRDebugEnabled || {
+          # Watch what the app itself says. Firebase is chatty when debug logging is
+          # on, so this tells us whether the SDK started, whether debug mode took,
+          # and whether it decided to upload. Without this we are guessing.
+          xcrun simctl spawn "$SIM_UDID" log stream --level debug \
+            --predicate 'eventMessage CONTAINS[c] "firebase" OR eventMessage CONTAINS[c] "FIRAnalytics" OR eventMessage CONTAINS[c] "app-measurement" OR subsystem CONTAINS "com.google"' \
+            > firebase-console.log 2>&1 &
+          echo $! > logstream.pid
+          sleep 2
+
+          # These flags make the Firebase SDK upload within seconds instead of
+          # batching for up to an hour, and make it log verbosely. On iOS this is a
+          # LAUNCH ARGUMENT, so no root or jailbreak is needed: we control the launch.
+          # Harmless for apps that do not use Firebase.
+          xcrun simctl launch "$SIM_UDID" "$BUNDLE_ID" \
+            -FIRDebugEnabled -FIRAnalyticsDebugEnabled -FIRAnalyticsVerboseLoggingEnabled || {
             echo "Launch failed. Bundle ids present on device:"
             xcrun simctl listapps "$SIM_UDID" | grep -i bundleid || true
             exit 1
           }
-          echo "App launched. Waiting for events, and for Firebase to upload..."
+          echo "App launched. Letting it fire and settle..."
+          sleep 40
+
+          # Firebase flushes when the app goes to the background. There is no home
+          # button on a headless simulator, so we push our app back by opening
+          # another one. This is the iOS equivalent of the HOME keypress we send
+          # on Android before waiting for the SDK to upload.
+          echo "Backgrounding the app to trigger a flush..."
+          xcrun simctl launch "$SIM_UDID" com.apple.mobilesafari > /dev/null 2>&1 || true
           sleep 45
           xcrun simctl io "$SIM_UDID" screenshot screen.png || true
           echo "Stopping the recorder."
+          kill "$(cat logstream.pid)" 2>/dev/null || true
           kill "$(cat proxy.pid)" 2>/dev/null || true
           sleep 3
           # Convert the raw recording into a HAR. Runs even if the flow above was odd.
@@ -240,6 +261,20 @@ jobs:
               print("   present, the capture works and the issue is Firebase-specific.")
           PY
 
+      - name: What the Firebase SDK said
+        if: always()
+        run: |
+          if [ ! -s firebase-console.log ]; then
+            echo "No Firebase log lines were captured at all."
+            echo "That usually means the SDK never started (check GoogleService-Info.plist is in the app bundle)."
+            exit 0
+          fi
+          echo "--- lines mentioning debug mode / upload / collection ---"
+          grep -iE "debug|upload|collection|disabled|enabled|measurement" firebase-console.log | head -40 || true
+          echo
+          echo "--- first 30 Firebase lines ---"
+          head -30 firebase-console.log
+
       - name: Upload results
         if: always()
         uses: actions/upload-artifact@v4
@@ -250,3 +285,4 @@ jobs:
             dump.mitm
             screen.png
             mitm.log
+            firebase-console.log
