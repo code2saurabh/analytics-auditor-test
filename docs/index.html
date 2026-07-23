@@ -111,6 +111,11 @@
   .hidden{display:none}
   details{margin-top:10px}
   summary{font-family:var(--mono);font-size:12px;cursor:pointer;color:var(--accent)}
+  /* platform toggle */
+  .seg{display:inline-flex;border:1px solid var(--rule-2);border-radius:3px;overflow:hidden;margin-bottom:16px}
+  .segbtn{font-family:var(--mono);font-size:12px;letter-spacing:.06em;text-transform:uppercase;
+          padding:8px 18px;border:0;background:var(--card);color:var(--ink-3);cursor:pointer}
+  .segbtn.on{background:var(--ink);color:#fff}
   /* run-an-audit panel */
   .fieldlabel{display:block;font-family:var(--mono);font-size:11px;letter-spacing:.1em;text-transform:uppercase;
               color:var(--ink-3);font-weight:700;margin:22px 0 8px}
@@ -149,17 +154,24 @@
       <span class="step-note">Upload an APK &middot; it runs itself</span>
     </div>
     <div class="card">
+      <div class="seg" id="platformseg">
+        <button type="button" class="segbtn on" data-plat="android">Android</button>
+        <button type="button" class="segbtn" data-plat="ios">iOS</button>
+      </div>
       <div id="apkdrop">
-        <b>Drop an .apk or .apkm here</b>
-        <span>or click to choose one &middot; any size</span>
+        <b id="dropTitle">Drop an .apk or .apkm here</b>
+        <span id="dropSub">or click to choose one &middot; any size</span>
         <input type="file" id="apkfile" accept=".apk,.apkm,.xapk,.apks" class="hidden">
       </div>
       <p class="hint" id="apkchosen" style="display:none"></p>
 
+      <div id="journeyblock">
       <label class="fieldlabel" for="journey">Journey <span>&mdash; the taps to perform, one per line or separated by ;</span></label>
       <textarea id="journey" spellcheck="false" placeholder="tap Accept&#10;wait 3&#10;tap Search&#10;type shoes&#10;key enter"></textarea>
       <p class="hint">Verbs: <code>tap TEXT</code>, <code>tapat top-right</code>, <code>type WORDS</code>, <code>wait N</code>, <code>key back</code>.
         Leave blank to just launch the app and auto-dismiss a consent popup.</p>
+      </div>
+      <p class="hint" id="iosnote" style="display:none">iOS runs the app in a simulator and records what it sends on launch. Journeys are not automated on iOS yet, so give it a build that reports on startup. The upload must be a <b>simulator build</b> (.app zipped). An .ipa from the App Store cannot be used.</p>
 
       <div style="margin-top:16px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
         <button class="btn" id="startrun" disabled>Start audit</button>
@@ -173,20 +185,6 @@
     </div>
   </section>
 
-<section id="demo-section">
-  <div class="step">
-    <span class="step-n">DEMO</span>
-    <h2>Live phone</h2>
-    <span class="step-note">visual demo &middot; not connected to the audit</span>
-  </div>
-  <div class="card">
-    <p class="hint" style="margin-top:0">A real Android phone running in the cloud that you can tap through. This is a visual demo only. Nothing on this phone is captured or audited &mdash; the real audit runs above.</p>
-    <div style="margin-top:16px">
-      <a class="btn" href="https://appetize.io/app/b_4bwg2z7ajkgqihwszl3hwpfaei" target="_blank" rel="noopener">Open the live phone</a>
-    </div>
-  </div>
-</section>
-  
   <section id="spec-section">
     <div class="step">
       <span class="step-n">01</span>
@@ -762,6 +760,7 @@ const SAMPLE = { log: { entries: [
 //  when a run finishes we just feed its dump.har into run() like any recording.
 // ============================================================================
 const WORKER = "https://analytics-auditor.saurabhgodara02.workers.dev";
+let platform = "android";    // which pipeline to run: android or ios
 let apkFile = null;          // a file chosen this session (needs uploading)
 let reuseKey = null;         // storage key of a file already uploaded earlier
 let reuseName = "";
@@ -786,6 +785,27 @@ function loadLastUpload(){
   } catch(e){}
 }
 loadLastUpload();
+
+// Platform toggle: swaps what we accept and which pipeline we trigger.
+document.querySelectorAll('#platformseg .segbtn').forEach(b => {
+  b.onclick = () => {
+    document.querySelectorAll('#platformseg .segbtn').forEach(x => x.classList.remove('on'));
+    b.classList.add('on');
+    platform = b.dataset.plat;
+    const ios = platform === 'ios';
+    $('dropTitle').textContent = ios ? 'Drop a .app.zip here' : 'Drop an .apk or .apkm here';
+    $('dropSub').textContent   = ios ? 'a zipped simulator build \u00b7 any size'
+                                     : 'or click to choose one \u00b7 any size';
+    $('apkfile').setAttribute('accept', ios ? '.zip' : '.apk,.apkm,.xapk,.apks');
+    $('journeyblock').style.display = ios ? 'none' : '';
+    $('iosnote').style.display      = ios ? 'block' : 'none';
+    // A file picked for the other platform no longer applies.
+    apkFile = null; reuseKey = null;
+    $('apkchosen').style.display = 'none';
+    $('startrun').disabled = true;
+    $('starthint').textContent = ios ? 'Choose a .app.zip to begin.' : 'Choose an APK to begin.';
+  };
+});
 
 const apkdrop = $('apkdrop'), apkfile = $('apkfile');
 apkdrop.onclick = () => apkfile.click();
@@ -822,7 +842,10 @@ $('startrun').onclick = async () => {
     let key;
     if (apkFile){
       stage(8, 'Requesting a secure upload link\u2026');
-      const pre = await fetch(WORKER + '/presign', { method: 'POST' }).then(r => r.json());
+      const pre = await fetch(WORKER + '/presign', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ platform })
+      }).then(r => r.json());
       if (!pre.uploadUrl) throw new Error('could not get an upload link');
 
       stage(20, `Uploading ${apkFile.name} to storage\u2026 (large files take a moment)`);
@@ -839,7 +862,7 @@ $('startrun').onclick = async () => {
     stage(34, 'Starting the run on GitHub\u2026');
     const st = await fetch(WORKER + '/start', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ key: key, journey: $('journey').value })
+      body: JSON.stringify({ key: key, journey: $('journey').value, platform })
     }).then(r => r.json());
     if (!st.ok) throw new Error('could not start the run');
 
@@ -848,7 +871,7 @@ $('startrun').onclick = async () => {
     for (let i = 0; i < 120; i++){          // poll ~15s x 120 = up to 30 min
       await sleep(15000);
       const el = Math.round((Date.now() - t0) / 1000);
-      const s = await fetch(WORKER + `/status?since=${encodeURIComponent(since)}`).then(r => r.json());
+      const s = await fetch(WORKER + `/status?since=${encodeURIComponent(since)}&platform=${platform}`).then(r => r.json());
       status = s.status || 'queued'; runId = s.runId;
       const label = status === 'queued' ? 'Waiting for a runner'
                   : status === 'in_progress' ? 'Running the emulator and journey'
@@ -864,7 +887,7 @@ $('startrun').onclick = async () => {
     if (!runId) throw new Error('run finished but no run id came back');
 
     stage(90, 'Downloading the result\u2026');
-    const zipBuf = await fetch(WORKER + `/result?runId=${runId}`).then(r => r.arrayBuffer());
+    const zipBuf = await fetch(WORKER + `/result?runId=${runId}&platform=${platform}`).then(r => r.arrayBuffer());
 
     stage(96, 'Unpacking the recording\u2026');
     const harText = await extractFromZip(new Uint8Array(zipBuf), 'dump.har');
