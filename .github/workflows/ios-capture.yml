@@ -6,13 +6,18 @@ on:
 jobs:
   capture:
     runs-on: macos-14
-    timeout-minutes: 40
+    timeout-minutes: 90
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Install XcodeGen and mitmproxy
-        run: brew install xcodegen mitmproxy
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: 1
+          HOMEBREW_NO_INSTALL_CLEANUP: 1
+        run: |
+          brew install xcodegen mitmproxy
+          mitmdump --version | head -2
 
       - name: Generate Xcode project
         run: xcodegen generate
@@ -137,11 +142,14 @@ jobs:
             exit 1
           }
           echo "App launched. Waiting for it to fire events..."
-          sleep 25
+          sleep 15
           xcrun simctl io "$SIM_UDID" screenshot screen.png || true
-          kill "$(cat proxy.pid)" || true
+          echo "Stopping the recorder."
+          kill "$(cat proxy.pid)" 2>/dev/null || true
           sleep 3
+          # Convert the raw recording into a HAR. Runs even if the flow above was odd.
           HAR_OUT=dump.har mitmdump -r dump.mitm -s har_dump.py -q || true
+          ls -la dump.mitm dump.har 2>/dev/null || true
 
       - name: Turn the Mac proxy back off
         if: always()
@@ -154,6 +162,13 @@ jobs:
       - name: Summarise what was captured
         if: always()
         run: |
+          # If the capture step was cut short, dump.mitm may exist without dump.har.
+          if [ ! -f dump.har ] && [ -f dump.mitm ]; then
+            echo "Recovering HAR from the raw recording..."
+            pkill mitmdump 2>/dev/null || true
+            sleep 2
+            HAR_OUT=dump.har mitmdump -r dump.mitm -s har_dump.py -q || true
+          fi
           if [ ! -f dump.har ]; then echo "No HAR produced."; exit 0; fi
           python3 - <<'PY'
           import json, collections, urllib.parse
@@ -173,5 +188,6 @@ jobs:
           name: ios-capture
           path: |
             dump.har
+            dump.mitm
             screen.png
             mitm.log
