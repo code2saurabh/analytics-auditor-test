@@ -6,10 +6,13 @@ options:
     iOS: "15.0"
 
 # Firebase ships as a Swift Package. XcodeGen fetches it during the build.
+# PINNED to the 10.x line on purpose: newer Firebase (11.x+) is written in
+# Swift 6 and needs Xcode 16, but GitHub's macos-14 runner has Xcode 15.4.
+# Unpinning this brings back "cannot find type 'sending' in scope" errors.
 packages:
   Firebase:
     url: https://github.com/firebase/firebase-ios-sdk
-    from: "11.0.0"
+    majorVersion: 10.29.0
 
 targets:
   AnalyticsAuditor:
