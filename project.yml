@@ -4,11 +4,21 @@ options:
   compatibilityVersion: "14.0"
   deploymentTarget:
     iOS: "15.0"
+
+# Firebase ships as a Swift Package. XcodeGen fetches it during the build.
+packages:
+  Firebase:
+    url: https://github.com/firebase/firebase-ios-sdk
+    from: "11.0.0"
+
 targets:
   AnalyticsAuditor:
     type: application
     platform: iOS
     sources: [Sources]
+    dependencies:
+      - package: Firebase
+        product: FirebaseAnalytics
     info:
       path: Sources/Info.plist
       properties:
@@ -16,6 +26,8 @@ targets:
         UILaunchScreen: {}
         NSAppTransportSecurity:
           NSAllowsArbitraryLoads: true
+        # Make sure analytics collection is on, regardless of console defaults.
+        FIREBASE_ANALYTICS_COLLECTION_ENABLED: true
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.example.analyticsauditor.ios
