@@ -180,13 +180,15 @@ jobs:
           sleep 4
           echo "Installing $APP_PATH"
           xcrun simctl install "$SIM_UDID" "$APP_PATH"
-          xcrun simctl launch "$SIM_UDID" "$BUNDLE_ID" || {
+          # -FIRDebugEnabled makes the Firebase SDK upload within seconds instead of
+          # batching for up to an hour. Harmless for apps that do not use Firebase.
+          xcrun simctl launch "$SIM_UDID" "$BUNDLE_ID" -FIRDebugEnabled || {
             echo "Launch failed. Bundle ids present on device:"
             xcrun simctl listapps "$SIM_UDID" | grep -i bundleid || true
             exit 1
           }
-          echo "App launched. Waiting for it to fire events..."
-          sleep 15
+          echo "App launched. Waiting for events, and for Firebase to upload..."
+          sleep 45
           xcrun simctl io "$SIM_UDID" screenshot screen.png || true
           echo "Stopping the recorder."
           kill "$(cat proxy.pid)" 2>/dev/null || true
@@ -222,8 +224,20 @@ jobs:
           h = collections.Counter(urllib.parse.urlparse(e["request"]["url"]).hostname or "?" for e in es)
           for host, n in h.most_common(20): print("  %3d  %s" % (n, host))
           ga = [e for e in es if "google-analytics.com/g/collect" in e["request"]["url"]]
-          print("\nGA4 g/collect hits (our app):", len(ga))
+          print("\nGA4 g/collect hits (control sample):", len(ga))
           for e in ga: print("   ", e["request"]["url"][:90])
+
+          fb = [e for e in es if "app-measurement.com" in e["request"]["url"]]
+          posts = [e for e in fb if e["request"]["method"] == "POST"]
+          print("\napp-measurement.com entries:", len(fb), " of which POSTs:", len(posts))
+          for e in fb:
+              pd = e["request"].get("postData", {})
+              print("   %-4s %-58s body=%sB enc=%s" % (
+                  e["request"]["method"], e["request"]["url"][:58],
+                  e["request"].get("bodySize"), pd.get("encoding", "text")))
+          if not posts:
+              print("\n   No Firebase upload captured. If the control GA4 hits above are")
+              print("   present, the capture works and the issue is Firebase-specific.")
           PY
 
       - name: Upload results
