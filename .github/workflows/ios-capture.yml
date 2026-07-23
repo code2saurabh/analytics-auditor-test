@@ -169,9 +169,24 @@ jobs:
           SVC=$(networksetup -listallnetworkservices | tail -n +2 | grep -v '\*' | head -1)
           if [ -z "$SVC" ]; then SVC="Wi-Fi"; fi
           echo "NET_SVC=$SVC" >> "$GITHUB_ENV"
+
+          # IMPORTANT: this proxy is system-wide on the runner, so it would also
+          # capture the Actions runner's own connection back to GitHub. mitmproxy
+          # presents an untrusted certificate to it, the runner loses contact, and
+          # GitHub cancels the job as a lost runner. Bypassing GitHub's own hosts
+          # keeps the runner talking to GitHub directly while the simulator's app
+          # traffic still goes through us.
+          sudo networksetup -setproxybypassdomains "$SVC" \
+            "*.github.com" "github.com" \
+            "*.githubusercontent.com" "githubusercontent.com" \
+            "*.actions.githubusercontent.com" \
+            "*.blob.core.windows.net" "*.azureedge.net" "*.windows.net" \
+            "localhost" "127.0.0.1" "169.254.169.254" "*.local"
+
           sudo networksetup -setwebproxy "$SVC" 127.0.0.1 8080
           sudo networksetup -setsecurewebproxy "$SVC" 127.0.0.1 8080
-          echo "System proxy set on '$SVC'."
+          echo "System proxy set on '$SVC', with GitHub's own hosts bypassed."
+          networksetup -getproxybypassdomains "$SVC"
 
       - name: Record, install, launch, capture
         run: |
@@ -224,6 +239,7 @@ jobs:
           if [ -n "$NET_SVC" ]; then
             sudo networksetup -setwebproxystate "$NET_SVC" off || true
             sudo networksetup -setsecurewebproxystate "$NET_SVC" off || true
+            sudo networksetup -setproxybypassdomains "$NET_SVC" "Empty" || true
           fi
 
       - name: Summarise what was captured
