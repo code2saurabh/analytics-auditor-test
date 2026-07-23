@@ -84,6 +84,29 @@ jobs:
           echo "BUNDLE_ID=$BID" >> "$GITHUB_ENV"
           echo "Bundle id under test: $BID"
 
+      # Firebase reads GoogleService-Info.plist from INSIDE the built app bundle.
+      # Having it in the repo is not enough: the build has to copy it in. XcodeGen
+      # does not always do that for a stray .plist, and if it is missing the SDK
+      # starts up and then quietly does nothing, which looks exactly like the
+      # silence we are debugging. So: check, and fix it if needed.
+      - name: Make sure the Firebase config is inside the app
+        run: |
+          echo "--- what is actually inside the built app ---"
+          ls -la "$APP_PATH" | head -30
+          if [ -f "$APP_PATH/GoogleService-Info.plist" ]; then
+            echo "GoogleService-Info.plist IS in the bundle."
+          else
+            echo "GoogleService-Info.plist is MISSING from the bundle."
+            if [ -f Sources/GoogleService-Info.plist ]; then
+              cp Sources/GoogleService-Info.plist "$APP_PATH/"
+              echo "Copied it in from Sources/."
+            else
+              echo "No GoogleService-Info.plist in Sources/ either - Firebase cannot start."
+            fi
+          fi
+          echo "--- bundle id Firebase will expect ---"
+          /usr/libexec/PlistBuddy -c "Print :BUNDLE_ID" "$APP_PATH/GoogleService-Info.plist" 2>/dev/null || true
+
       - name: Write the HAR converter
         run: |
           cat > har_dump.py <<'PY'
@@ -214,8 +237,12 @@ jobs:
             xcrun simctl listapps "$SIM_UDID" | grep -i bundleid || true
             exit 1
           }
-          echo "App launched. Letting it fire and settle..."
-          sleep 40
+          # Firebase is slow to warm up on a cold simulator. Measured on this runner:
+          # ~13s to configure, ~74s before Analytics reported "Debug mode is on".
+          # Installations must register before Analytics uploads anything, so short
+          # waits capture nothing at all. Be patient here.
+          echo "App launched. Waiting for Firebase to initialise (this is slow)..."
+          sleep 100
 
           # Firebase flushes when the app goes to the background. There is no home
           # button on a headless simulator, so we push our app back by opening
@@ -223,7 +250,15 @@ jobs:
           # on Android before waiting for the SDK to upload.
           echo "Backgrounding the app to trigger a flush..."
           xcrun simctl launch "$SIM_UDID" com.apple.mobilesafari > /dev/null 2>&1 || true
-          sleep 45
+          sleep 150
+
+          # Bring our app back to the foreground and background it once more.
+          # A second foreground/background cycle gives the SDK another flush point.
+          echo "Second foreground/background cycle..."
+          xcrun simctl launch "$SIM_UDID" "$BUNDLE_ID" > /dev/null 2>&1 || true
+          sleep 30
+          xcrun simctl launch "$SIM_UDID" com.apple.mobilesafari > /dev/null 2>&1 || true
+          sleep 60
           xcrun simctl io "$SIM_UDID" screenshot screen.png || true
           echo "Stopping the recorder."
           kill "$(cat logstream.pid)" 2>/dev/null || true
@@ -286,7 +321,7 @@ jobs:
             exit 0
           fi
           echo "--- lines mentioning debug mode / upload / collection ---"
-          grep -iE "debug|upload|collection|disabled|enabled|measurement" firebase-console.log | head -40 || true
+          grep -iE "FirebaseAnalytics|FirebaseCore|FirebaseInstallations|upload|measurement|debug mode" firebase-console.log | head -60 || true
           echo
           echo "--- first 30 Firebase lines ---"
           head -30 firebase-console.log
