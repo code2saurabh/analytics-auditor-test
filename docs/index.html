@@ -49,6 +49,10 @@
   .card{background:var(--card);border:1px solid var(--rule);border-radius:3px;padding:22px}
 
   .presets{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px}
+  .specrow{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:12px}
+  .specrow input{font-family:var(--mono);font-size:12.5px;padding:7px 10px;border:1px solid var(--rule-2);
+                 border-radius:3px;background:var(--card);color:var(--ink);min-width:230px}
+  .preset.del{color:var(--missing);padding-left:6px;padding-right:6px}
   .preset{font-family:var(--mono);font-size:12px;font-weight:500;padding:7px 13px;cursor:pointer;
           background:transparent;border:1px solid var(--rule-2);border-radius:2px;color:var(--ink-2)}
   .preset:hover{border-color:var(--accent);color:var(--accent)}
@@ -193,7 +197,13 @@
     </div>
     <div class="card">
       <div class="presets" id="presets"></div>
+      <div class="presets" id="savedbar"></div>
       <textarea id="spec" spellcheck="false" aria-label="Expected events"></textarea>
+      <div class="specrow">
+        <input type="text" id="specname" placeholder="Name this spec (e.g. Acme iOS app)" spellcheck="false">
+        <button type="button" class="preset" id="specsave">Save</button>
+        <button type="button" class="preset" id="specfill" title="Start a spec from the events this recording actually contained">Fill from last run</button>
+      </div>
       <p class="hint">Format: <code>event_name: param, param, param</code> &nbsp;&middot;&nbsp; parameters are optional. Lines starting with <code>#</code> are ignored.</p>
     </div>
   </section>
@@ -232,6 +242,10 @@ const PRESETS = {
   "Our test app": `# What our own test app is built to send.
 test_event: source, run_id, n
 canary_event: `,
+  "Our iOS test app": `# What our iOS test app sends on launch.
+app_open: source
+login: source
+purchase: source`,
   "Shopping journey": `# The journey the auditor is meant to check.
 login:
 search:
@@ -243,7 +257,14 @@ purchase: transaction_id, currency, value, item_id`,
 };
 
 const VENDORS = [
+  // Firebase Analytics does not use one host per platform. It uses several:
+  // app-measurement.com is the long-standing endpoint (and the SDK also pings it
+  // for connectivity checks); on iOS, event uploads go to app-analytics-services.com,
+  // or to the -att variant when App Tracking Transparency consent was granted.
+  // We accept all of them, so a capture is never missed because of the host alone.
   ["app-measurement.com",                  "Firebase / GA4 (mobile SDK)"],
+  ["app-analytics-services.com",            "Firebase / GA4 (mobile SDK)"],
+  ["app-analytics-services-att.com",        "Firebase / GA4 (mobile SDK, ATT granted)"],
   ["google-analytics.com",                 "GA4"],
   ["analytics.google.com",                 "GA4"],
   ["firebaseinstallations.googleapis.com", "Firebase Installations"],
@@ -273,7 +294,8 @@ const PII_KEYS = ["email","e_mail","mail","phone","mobile","msisdn","name","firs
 // ============================================================================
 //  Firebase blob decoder.
 //  Android's Firebase SDK does not send readable event names - it gzips a
-//  protobuf and POSTs it to app-measurement.com/a. Everything below was worked
+//  protobuf and POSTs it to one of Google's measurement hosts (app-measurement.com
+//  or app-analytics-services.com). Everything below was worked
 //  out by taking a real upload apart, field by field. It is not a published
 //  spec, so it is read defensively: anything unrecognised is skipped, never
 //  guessed at.
@@ -412,8 +434,62 @@ Object.keys(PRESETS).forEach((name, i) => {
 });
 $('spec').value = PRESETS["Our test app"];
 
+// ---------- saved specs ----------
+// Each app fires its own events, so a spec is per-app. These persist in the
+// browser so a returning client's checklist does not have to be retyped.
+function loadSaved(){
+  try { return JSON.parse(localStorage.getItem('savedSpecs') || '{}'); } catch(e){ return {}; }
+}
+function storeSaved(o){
+  try { localStorage.setItem('savedSpecs', JSON.stringify(o)); } catch(e){}
+}
+function renderSaved(){
+  const bar = $('savedbar'), all = loadSaved(), names = Object.keys(all);
+  bar.innerHTML = '';
+  if (!names.length){ bar.style.display = 'none'; return; }
+  bar.style.display = 'flex';
+  const label = document.createElement('span');
+  label.className = 'hint'; label.style.margin = '0 4px 0 0'; label.textContent = 'Saved:';
+  bar.appendChild(label);
+  names.forEach(n => {
+    const b = document.createElement('button');
+    b.className = 'preset'; b.textContent = n;
+    b.onclick = () => {
+      $('spec').value = all[n];
+      $('specname').value = n;
+      [...presetBar.children].forEach(c => c.setAttribute('aria-pressed','false'));
+      if (lastHar) run(lastHar, lastName);
+    };
+    bar.appendChild(b);
+    const x = document.createElement('button');
+    x.className = 'preset del'; x.textContent = '\u00d7'; x.title = 'Forget ' + n;
+    x.onclick = () => { const o = loadSaved(); delete o[n]; storeSaved(o); renderSaved(); };
+    bar.appendChild(x);
+  });
+}
+$('specsave').onclick = () => {
+  const name = ($('specname').value || '').trim();
+  if (!name){ $('specname').focus(); return; }
+  const all = loadSaved(); all[name] = $('spec').value; storeSaved(all); renderSaved();
+};
+// Seed a spec from what a recording actually contained. Useful for a new app:
+// see what it fires, then edit that list down to what it SHOULD fire.
+$('specfill').onclick = () => {
+  if (!lastEvents || !lastEvents.length){
+    $('specname').placeholder = 'Run or drop a recording first';
+    return;
+  }
+  const lines = ['# Seeded from the last recording. Edit this down to what the app SHOULD send.'];
+  lastEvents.forEach(e => {
+    const params = (e.params || []).filter(p => !p.startsWith('_')).map(p => p.replace(/^epn?\./, ''));
+    lines.push(e.name + ': ' + params.join(', '));
+  });
+  $('spec').value = lines.join('\n');
+};
+renderSaved();
+
 // ---------- file loading ----------
-let lastHar = null, lastName = "";
+let lastHar = null, lastName = "", lastEvents = [];
 const drop = $('drop'), file = $('file');
 drop.onclick = () => file.click();
 drop.ondragover = e => { e.preventDefault(); drop.classList.add('over'); };
@@ -491,7 +567,11 @@ async function extract(har){
     const vendor = vendorOf(host);
     if (!vendor) continue;
     analytics.push(e);
-    if (host.includes("app-measurement.com") || host.includes("firebaseinstallations")) fbSeen = true;
+    // Firebase Analytics ships to more than one host. Accept any of them: the
+    // payload format is the same, only the destination varies by SDK version,
+    // platform and ATT consent state.
+    if (host.includes("app-measurement.com") || host.includes("app-analytics-services")
+        || host.includes("firebaseinstallations")) fbSeen = true;
 
     const body = (e.request.postData && e.request.postData.text) || "";
     texts.push(url); if (body) texts.push(body);
@@ -508,7 +588,8 @@ async function extract(har){
     }
     // Firebase mobile SDK ships events as compressed protobuf. We can see the
     // request, but not what is inside it. Count it; never guess at it.
-    if (host.includes("app-measurement.com") && e.request.method === "POST"){
+    if ((host.includes("app-measurement.com") || host.includes("app-analytics-services"))
+        && e.request.method === "POST"){
       fbUploads++;
       let bundles = null;
       try { bundles = await decodeFirebaseBlob(e.request.postData); }
@@ -552,6 +633,18 @@ async function run(har, name){
   const { entries, found, opaque, fbUploads, fbSeen, fbDecoded, fbProps, fbPkg, fbPkgs, hosts, analytics, texts } = await extract(har);
   const spec = parseSpec($('spec').value);
   const out = $('out');
+
+  // Remember what actually fired, so a spec can be seeded from a real recording.
+  // Events are deduped by name and their parameter names merged.
+  {
+    const byName = new Map();
+    for (const e of found){
+      const ps = byName.get(e.name) || new Set();
+      Object.keys(e.params || {}).forEach(k => ps.add(k));
+      byName.set(e.name, ps);
+    }
+    lastEvents = [...byName].map(([name, ps]) => ({ name, params: [...ps] }));
+  }
   $('report').classList.remove('hidden');
 
   if (!entries.length){
