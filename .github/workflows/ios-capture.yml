@@ -2,6 +2,11 @@ name: iOS Capture Test
 
 on:
   workflow_dispatch:
+    inputs:
+      app_url:
+        description: "URL of a .app.zip to audit. Leave blank to build and audit our own test app."
+        type: string
+        default: ""
 
 jobs:
   capture:
@@ -20,14 +25,17 @@ jobs:
           mitmdump --version | head -2
 
       - name: Generate Xcode project
+        if: ${{ inputs.app_url == '' }}
         run: xcodegen generate
 
       - name: Downgrade project format so Xcode can open it
+        if: ${{ inputs.app_url == '' }}
         run: |
           sed -i '' 's/objectVersion = 77;/objectVersion = 56;/' AnalyticsAuditor.xcodeproj/project.pbxproj || true
           grep -m1 objectVersion AnalyticsAuditor.xcodeproj/project.pbxproj
 
       - name: Build the .app for the simulator
+        if: ${{ inputs.app_url == '' }}
         run: |
           xcodebuild \
             -project AnalyticsAuditor.xcodeproj \
@@ -39,6 +47,42 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             build
           echo "APP_PATH=$(find build -name '*.app' -type d | head -1)" >> "$GITHUB_ENV"
+
+      # When an app_url is supplied we audit somebody else's build instead of ours.
+      # The upload is a .zip containing a .app bundle (that is how iOS ships
+      # simulator builds), so we unzip it and find the .app inside.
+      - name: Fetch the app under test
+        if: ${{ inputs.app_url != '' }}
+        env:
+          APP_URL: ${{ inputs.app_url }}
+        run: |
+          mkdir -p incoming
+          echo "Downloading the uploaded app..."
+          curl -fL "$APP_URL" -o incoming/app.zip
+          ls -la incoming/
+          unzip -o -q incoming/app.zip -d incoming/unpacked
+          FOUND=$(find incoming/unpacked -maxdepth 3 -name "*.app" -type d | head -1)
+          if [ -z "$FOUND" ]; then
+            echo "############################################################"
+            echo "No .app bundle found inside the upload. This is a RESULT."
+            echo "iOS auditing needs a SIMULATOR build (.app zipped up)."
+            echo "An .ipa from the App Store cannot be used: it is encrypted"
+            echo "and built for real devices, so no simulator can run it."
+            echo "Contents of the upload:"
+            find incoming/unpacked -maxdepth 2 | head -30
+            echo "############################################################"
+            exit 1
+          fi
+          echo "Found app bundle: $FOUND"
+          echo "APP_PATH=$FOUND" >> "$GITHUB_ENV"
+
+      - name: Read the app's bundle id
+        run: |
+          # Every iOS app declares its own id. We read it from the bundle rather
+          # than hardcoding, so any client's app can be launched.
+          BID=$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$APP_PATH/Info.plist")
+          echo "BUNDLE_ID=$BID" >> "$GITHUB_ENV"
+          echo "Bundle id under test: $BID"
 
       - name: Write the HAR converter
         run: |
@@ -136,7 +180,7 @@ jobs:
           sleep 4
           echo "Installing $APP_PATH"
           xcrun simctl install "$SIM_UDID" "$APP_PATH"
-          xcrun simctl launch "$SIM_UDID" com.example.analyticsauditor.ios || {
+          xcrun simctl launch "$SIM_UDID" "$BUNDLE_ID" || {
             echo "Launch failed. Bundle ids present on device:"
             xcrun simctl listapps "$SIM_UDID" | grep -i bundleid || true
             exit 1
@@ -171,9 +215,10 @@ jobs:
           fi
           if [ ! -f dump.har ]; then echo "No HAR produced."; exit 0; fi
           python3 - <<'PY'
-          import json, collections, urllib.parse
+          import json, collections, urllib.parse, os
           d = json.load(open("dump.har")); es = d["log"]["entries"]
           print("Captured", len(es), "requests")
+          print("Bundle under test:", os.environ.get("BUNDLE_ID", "(ours)"))
           h = collections.Counter(urllib.parse.urlparse(e["request"]["url"]).hostname or "?" for e in es)
           for host, n in h.most_common(20): print("  %3d  %s" % (n, host))
           ga = [e for e in es if "google-analytics.com/g/collect" in e["request"]["url"]]
