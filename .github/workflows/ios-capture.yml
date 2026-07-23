@@ -299,9 +299,12 @@ jobs:
           print("\nGA4 g/collect hits (control sample):", len(ga))
           for e in ga: print("   ", e["request"]["url"][:90])
 
-          fb = [e for e in es if "app-measurement.com" in e["request"]["url"]]
+          # Firebase Analytics posts to app-measurement.com on Android but to
+          # app-analytics-services.com on iOS. Same SDK, different host.
+          FB_HOSTS = ("app-measurement.com", "app-analytics-services")
+          fb = [e for e in es if any(h in e["request"]["url"] for h in FB_HOSTS)]
           posts = [e for e in fb if e["request"]["method"] == "POST"]
-          print("\napp-measurement.com entries:", len(fb), " of which POSTs:", len(posts))
+          print("\nFirebase endpoint entries:", len(fb), " of which POSTs:", len(posts))
           for e in fb:
               pd = e["request"].get("postData", {})
               print("   %-4s %-58s body=%sB enc=%s" % (
